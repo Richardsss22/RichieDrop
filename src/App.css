@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  line-height: 1.5;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #0f172a;
+  /* Slate 900 */
+}
+
+/* Animations are now handled by Tailwind config */
+
+/* Helper for dragging state if needed globally */
+.drag-active * {
+  pointer-events: none;
+}
