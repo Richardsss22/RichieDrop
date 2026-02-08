@@ -36,6 +36,8 @@ jobs:
       
       - name: 🔨 Build APK
         working-directory: ./android/android
+        env:
+          NODE_ENV: production
         run: ./gradlew assembleRelease
       
       - name: 📤 Upload APK artifact
