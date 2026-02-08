@@ -1,69 +1,115 @@
-name: Release Build (DMG/EXE/AppImage)
+name: Release App
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*'
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-tauri:
-    name: Release on ${{ matrix.platform }}
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧾 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🏗️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📦 Install dependencies
+        working-directory: ./android
+        run: npm install
+
+      - name: 📱 Prebuild
+        working-directory: ./android
+        run: npx expo prebuild --platform android --clean
+
+      - name: 🔨 Build APK
+        working-directory: ./android/android
+        env:
+          NODE_ENV: production
+        run: ./gradlew assembleRelease
+
+      - name: 🔍 Debug APK Location
+        working-directory: ./android
+        run: find . -name "*.apk"
+
+      - name: 📦 Prepare APK
+        id: prepare_apk
+        working-directory: ./android
+        run: |
+          APK_PATH="$(find . -type f -name '*release*.apk' -o -name '*app-release*.apk' | head -n 1)"
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::No APK found! checking debug..."
+            APK_PATH="$(find . -type f -name '*.apk' | head -n 1)"
+          fi
+          
+          if [ -z "$APK_PATH" ]; then
+             echo "::error::Still no APK found."
+             exit 1
+          fi
+
+          echo "Found APK at: $APK_PATH"
+          
+          # Rename for upload
+          mv "$APK_PATH" ./RichieDrop-Android.apk
+          echo "apk_path=RichieDrop-Android.apk" >> $GITHUB_OUTPUT
+
+      - name: 📤 Upload Android Assets
+        uses: softprops/action-gh-release@v2
+        if: steps.prepare_apk.outputs.apk_path != ''
+        with:
+          files: android/${{ steps.prepare_apk.outputs.apk_path }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+  build-desktop:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: "--target universal-apple-darwin"
-          - platform: windows-latest
-            args: ""
-          - platform: ubuntu-22.04
-            args: ""
+          - platform: 'macos-latest'
+            args: '--target universal-apple-darwin'
+          - platform: 'windows-latest'
+            args: ''
 
     runs-on: ${{ matrix.platform }}
-
     steps:
-      - name: Checkout
+      - name: 🧾 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install Rust
+      - name: 🦀 Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Linux system deps (Ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+      - name: 🏗️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: 📦 Install dependencies
+        run: npm install
 
-      - name: Install JS deps
-        run: npm ci
-
-      # ESTE PASSO (tauri-action) é o que cria/atualiza a release
-      # e faz upload APENAS dos instaladores finais (sem lixo).
-      - name: Build + Upload to Release
+      - name: 🔨 Build Desktop App
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          releaseBody: "Assets gerados automaticamente pelo GitHub Actions."
-          releaseDraft: false
-          prerelease: false
+          releaseName: 'RichieDrop ${{ github.ref_name }}'
           args: ${{ matrix.args }}
