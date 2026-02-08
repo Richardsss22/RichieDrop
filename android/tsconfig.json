@@ -2,12 +2,17 @@
     "compilerOptions": {
         "strict": true,
         "target": "ESNext",
+        "lib": [
+            "ES2022",
+            "DOM"
+        ],
         "module": "ESNext",
         "moduleResolution": "bundler",
         "jsx": "react-jsx",
         "esModuleInterop": true,
         "skipLibCheck": true,
         "resolveJsonModule": true,
+        "allowSyntheticDefaultImports": true,
         "baseUrl": ".",
         "paths": {
             "@/*": [
@@ -20,6 +25,5 @@
         "**/*.tsx",
         ".expo/types/**/*.ts",
         "expo-env.d.ts"
-    ],
-    "extends": "expo/tsconfig.base"
+    ]
 }
