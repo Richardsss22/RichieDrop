@@ -39,11 +39,21 @@ jobs:
         working-directory: ./android
         run: npx expo prebuild --platform android --clean
 
+      - name: 🔧 Patch Kotlin Version
+        working-directory: ./android/android
+        run: |
+          # Replace Kotlin version in build.gradle
+          sed -i 's/kotlinVersion = "1.9.24"/kotlinVersion = "1.9.25"/g' build.gradle 2>/dev/null || true
+          sed -i "s/ext.kotlinVersion = '1.9.24'/ext.kotlinVersion = '1.9.25'/g" build.gradle 2>/dev/null || true
+          # Also check for buildscript kotlin version
+          find . -name "build.gradle" -exec sed -i 's/1\.9\.24/1.9.25/g' {} \; 2>/dev/null || true
+          echo "Kotlin version patched to 1.9.25"
+
       - name: 🔨 Build APK
         working-directory: ./android/android
         env:
           NODE_ENV: production
-        run: ./gradlew assembleRelease -PkotlinVersion=1.9.25 --no-daemon
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: 🔍 Debug APK Location
         working-directory: ./android
