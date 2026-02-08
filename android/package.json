@@ -26,7 +26,8 @@
         "@react-native-async-storage/async-storage": "2.1.0",
         "lucide-react-native": "^0.460.0",
         "react-native-svg": "15.8.0",
-        "nativewind": "^4.1.0"
+        "nativewind": "^4.1.0",
+        "react-native-css-interop": "^0.1.0"
     },
     "devDependencies": {
         "@babel/core": "^7.25.0",
