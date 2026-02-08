@@ -1,0 +1,8 @@
+{
+    "expo": {
+        "icon": "./assets/icon.png",
+        "splash": "./assets/splash.png",
+        "adaptiveIcon": "./assets/adaptive-icon.png"
+    },
+    "note": "This is a placeholder. Replace the PNG files with actual app icons."
+}

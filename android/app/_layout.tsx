@@ -1,0 +1,23 @@
+/**
+ * Root Layout for Expo Router
+ */
+
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import '../global.css';
+
+export default function RootLayout() {
+    return (
+        <SafeAreaProvider>
+            <StatusBar style="light" />
+            <Stack
+                screenOptions={{
+                    headerShown: false,
+                    contentStyle: { backgroundColor: '#0f172a' },
+                    animation: 'fade',
+                }}
+            />
+        </SafeAreaProvider>
+    );
+}
