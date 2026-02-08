@@ -10,12 +10,16 @@ import {
     Image as ImageIcon,
     Share2,
     Check,
-    X
+    X,
+    Download,
+    Save
 } from 'lucide-react';
-import { startDiscovery, onDeviceFound, onDeviceLost, Device, getDevices } from "./discovery";
+import { startDiscovery, onDeviceFound, onDeviceLost, Device } from "./discovery";
 import { sendFile } from "./transfer";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // --- Utilitários de Estilo ---
 const glassClass = "bg-white/10 backdrop-blur-xl border border-white/20 shadow-2xl";
@@ -28,30 +32,45 @@ interface UIDevice extends Device {
     progress: number;
 }
 
+interface IncomingTransfer {
+    filename: string;
+    filesize: string;
+    sender_name: string;
+    download_url: string;
+}
+
 export default function App() {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const [scanning, _setScanning] = useState(true);
     const [foundDevices, setFoundDevices] = useState<UIDevice[]>([]);
     const [selectedFiles, setSelectedFiles] = useState<{ name: string, path: string, size?: string }[]>([]);
     const [isDragging, setIsDragging] = useState(false);
+
+    // Settings State
     const [myDeviceName, setMyDeviceName] = useState("My Device");
+    const [tempDeviceName, setTempDeviceName] = useState(""); // For editing
+
     const [showSettings, setShowSettings] = useState(false);
     const [showHistory, setShowHistory] = useState(false);
     const [transferHistory, setTransferHistory] = useState<{ name: string, device: string, time: string, success: boolean }[]>([]);
 
+    // Incoming Transfer State
+    const [incomingTransfer, setIncomingTransfer] = useState<IncomingTransfer | null>(null);
+    const [isReceiving, setIsReceiving] = useState(false);
+
     // --- Inicialização e Descoberta Real ---
     useEffect(() => {
         const initDiscovery = async () => {
-            // Nome aleatório para este cliente
-            const name = "Windows-" + Math.floor(Math.random() * 1000);
+            // Load saved name or generate random
+            let name = localStorage.getItem("richiedrop_name");
+            if (!name) {
+                name = "Windows-" + Math.floor(Math.random() * 1000);
+                localStorage.setItem("richiedrop_name", name);
+            }
             setMyDeviceName(name);
+            setTempDeviceName(name);
 
             // Iniciar serviço de descoberta na porta 8080
             await startDiscovery(name, 8080);
-
-            // Carregar dispositivos já encontrados
-            const initialDevices = await getDevices();
-            setFoundDevices(initialDevices.map(mapDeviceToUI));
 
             // Listeners
             const unlistenFound = await onDeviceFound((device) => {
@@ -65,7 +84,13 @@ export default function App() {
                 setFoundDevices((prev) => prev.filter((d) => d.id !== deviceId));
             });
 
-            // Drag & Drop do Tauri (Ficheiros Reais)
+            // Listen for Transfer Requests
+            const unlistenTransfer = await listen<IncomingTransfer>('transfer-request', (event) => {
+                console.log("Transfer Request Received:", event.payload);
+                setIncomingTransfer(event.payload);
+            });
+
+            // Drag & Drop do Tauri
             const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
                 if (event.payload.type === 'enter') {
                     setIsDragging(true);
@@ -75,13 +100,10 @@ export default function App() {
                     setIsDragging(false);
                     const paths = event.payload.paths;
                     if (paths && paths.length > 0) {
-                        // Adicionar ficheiro à lista
-                        // Nota: Em webview não conseguimos ver tamanho fácil sem File API do JS, 
-                        // mas paths são strings absolutas aqui.
                         const newFiles = paths.map(p => ({
                             name: p.split(/[/\\]/).pop() || "Unknown",
                             path: p,
-                            size: "Unknown" // Backend poderia resolver isso, ou ignoramos na UI
+                            size: "Unknown"
                         }));
                         setSelectedFiles(prev => [...prev, ...newFiles]);
                     }
@@ -92,6 +114,7 @@ export default function App() {
                 unlistenFound();
                 unlistenLost();
                 unlistenDrop();
+                unlistenTransfer();
             };
         };
 
@@ -113,6 +136,16 @@ export default function App() {
         };
     };
 
+    const handleSaveSettings = async () => {
+        if (tempDeviceName.trim() === "") return;
+        localStorage.setItem("richiedrop_name", tempDeviceName);
+        setMyDeviceName(tempDeviceName);
+
+        // Restart discovery with new name
+        await startDiscovery(tempDeviceName, 8080);
+        setShowSettings(false);
+    };
+
     // --- Envio Real ---
     const handleSend = async (deviceId: string) => {
         if (selectedFiles.length === 0) {
@@ -128,61 +161,104 @@ export default function App() {
             d.id === deviceId ? { ...d, status: 'sending', progress: 0 } : d
         ));
 
-        // Como o backend atual não reporta progresso granular, vamos simular progresso visual
-        // enquanto aguardamos a Promise do sendFile resolver (que significa servidor pronto)
-        let progress = 0;
-        const progressInterval = setInterval(() => {
-            progress += 10;
-            if (progress > 90) progress = 90; // Espera terminar
-            setFoundDevices(prev => prev.map(d => d.id === deviceId ? { ...d, progress } : d));
-        }, 200);
-
-        // Ficheiro a enviar (declarado aqui para estar acessível no catch)
         const fileToSend = selectedFiles[0];
 
         try {
-            console.log(`Sending ${fileToSend.path} to ${device.ip}:${device.port}`);
+            console.log(`Starting send for ${fileToSend.path}`);
 
-            // Backend Call
-            await sendFile(fileToSend.path);
+            // 1. Start serving file (Backend)
+            const result = await sendFile(fileToSend.path);
+            console.log(`File serving at ${result.ip}:${result.port}`);
 
-            clearInterval(progressInterval);
+            const downloadUrl = `http://${result.ip}:${result.port}/download/${encodeURIComponent(fileToSend.name)}`;
 
-            // Sucesso
-            setFoundDevices(prev => prev.map(d =>
-                d.id === deviceId ? { ...d, status: 'success', progress: 100 } : d
-            ));
+            // 2. Notify Peer (Signaling)
+            console.log(`Notifying peer at ${device.ip}:${device.port}`);
+            await invoke("notify_peer", {
+                targetIp: device.ip,
+                targetPort: device.port,
+                filename: fileToSend.name,
+                filesize: "Unknown",
+                senderName: myDeviceName,
+                downloadUrl: downloadUrl
+            });
 
-            // Adicionar ao histórico
-            setTransferHistory(prev => [{
-                name: fileToSend.name,
-                device: device.name,
-                time: new Date().toLocaleTimeString('pt-PT'),
-                success: true
-            }, ...prev].slice(0, 20)); // Keep last 20
+            // Simulate progress
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += 5;
+                if (progress > 95) clearInterval(interval);
+                setFoundDevices(prev => prev.map(d => d.id === deviceId ? { ...d, progress } : d));
+            }, 100);
 
             setTimeout(() => {
+                clearInterval(interval);
                 setFoundDevices(prev => prev.map(d =>
-                    d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
+                    d.id === deviceId ? { ...d, status: 'success', progress: 100 } : d
                 ));
-            }, 3000);
+
+                // Add History
+                setTransferHistory(prev => [{
+                    name: fileToSend.name,
+                    device: device.name,
+                    time: new Date().toLocaleTimeString('pt-PT'),
+                    success: true
+                }, ...prev].slice(0, 20));
+
+                setTimeout(() => {
+                    setFoundDevices(prev => prev.map(d =>
+                        d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
+                    ));
+                }, 3000);
+            }, 5000);
 
         } catch (e) {
             console.error(e);
-            clearInterval(progressInterval);
+            alert("Erro ao enviar: " + e);
+            setFoundDevices(prev => prev.map(d =>
+                d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
+            ));
 
-            // Adicionar falha ao histórico
             setTransferHistory(prev => [{
                 name: fileToSend.name,
                 device: device.name,
                 time: new Date().toLocaleTimeString('pt-PT'),
                 success: false
             }, ...prev].slice(0, 20));
+        }
+    };
 
-            alert("Erro ao enviar: " + e);
-            setFoundDevices(prev => prev.map(d =>
-                d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
-            ));
+    const handleAcceptTransfer = async () => {
+        if (!incomingTransfer) return;
+
+        try {
+            // Open Save Dialog
+            const savePath = await save({
+                defaultPath: incomingTransfer.filename
+            });
+
+            if (!savePath) return; // User cancelled
+
+            setIsReceiving(true);
+
+            // Start Download
+            await invoke("receive_file", { url: incomingTransfer.download_url, savePath });
+
+            // Success
+            setIsReceiving(false);
+            setIncomingTransfer(null);
+            alert("Ficheiro recebido com sucesso!");
+            setTransferHistory(prev => [{
+                name: incomingTransfer.filename,
+                device: incomingTransfer.sender_name,
+                time: new Date().toLocaleTimeString('pt-PT'),
+                success: true
+            }, ...prev].slice(0, 20));
+
+        } catch (e) {
+            console.error(e);
+            alert("Erro ao receber: " + e);
+            setIsReceiving(false);
         }
     };
 
@@ -234,14 +310,14 @@ export default function App() {
                     <div className="flex gap-2">
                         <button
                             onClick={() => setShowHistory(true)}
-                            className={`p-2 rounded-full ${buttonGlass} text-slate-300 hover:text-white`}
+                            className={`p-2 rounded-full ${buttonGlass} text-slate-300 hover:text-white pointer-events-auto cursor-pointer`}
                             title="Histórico"
                         >
                             <History size={20} />
                         </button>
                         <button
                             onClick={() => setShowSettings(true)}
-                            className={`p-2 rounded-full ${buttonGlass} text-slate-300 hover:text-white`}
+                            className={`p-2 rounded-full ${buttonGlass} text-slate-300 hover:text-white pointer-events-auto cursor-pointer`}
                             title="Definições"
                         >
                             <Settings size={20} />
@@ -277,16 +353,17 @@ export default function App() {
                         {/* Found Devices (Floating Orbit) */}
                         <div className="absolute inset-0 w-full h-full pointer-events-none">
                             {foundDevices.length === 0 ? (
-                                null // Mensagem já tratada abaixo
+                                null
                             ) : (
                                 foundDevices.map((device, index) => (
-                                    <DeviceCard
-                                        key={device.id}
-                                        device={device}
-                                        index={index}
-                                        total={foundDevices.length}
-                                        onSend={() => handleSend(device.id)}
-                                    />
+                                    <div key={device.id} className="pointer-events-auto">
+                                        <DeviceCard
+                                            device={device}
+                                            index={index}
+                                            total={foundDevices.length}
+                                            onSend={() => handleSend(device.id)}
+                                        />
+                                    </div>
                                 ))
                             )}
                         </div>
@@ -316,7 +393,7 @@ export default function App() {
                                     <p className="text-sm text-slate-500">ou clica para explorar</p>
                                     <button
                                         onClick={handleBrowse}
-                                        className="mt-4 px-6 py-2 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold text-sm transition-colors shadow-lg shadow-cyan-500/20"
+                                        className="mt-4 px-6 py-2 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold text-sm transition-colors shadow-lg shadow-cyan-500/20 cursor-pointer pointer-events-auto relative z-10"
                                     >
                                         Selecionar
                                     </button>
@@ -325,7 +402,7 @@ export default function App() {
                                 <div className="w-full flex flex-col gap-3">
                                     <div className="flex justify-between items-center mb-2">
                                         <span className="text-sm font-medium text-slate-300">Pronto a enviar</span>
-                                        <button onClick={() => setSelectedFiles([])} className="text-xs text-red-400 hover:text-red-300">Limpar</button>
+                                        <button onClick={() => setSelectedFiles([])} className="text-xs text-red-400 hover:text-red-300 cursor-pointer pointer-events-auto">Limpar</button>
                                     </div>
                                     {selectedFiles.map((file, i) => (
                                         <div key={i} className={`p-3 rounded-xl flex items-center gap-3 ${glassClass} animate-slide-in`}>
@@ -338,7 +415,7 @@ export default function App() {
                                             </div>
                                         </div>
                                     ))}
-                                    <div className="mt-4 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-xs">
+                                    <div className="mt-4 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-xs text-left">
                                         Clica num dispositivo no radar para enviar.
                                     </div>
                                 </div>
@@ -348,7 +425,7 @@ export default function App() {
                     </div>
                 </div>
 
-                {/* Global Drop Overlay (Visual cue) */}
+                {/* Global Drop Overlay */}
                 {isDragging && (
                     <div className="absolute inset-0 z-50 rounded-3xl bg-cyan-500/10 backdrop-blur-sm border-2 border-cyan-400 flex items-center justify-center pointer-events-none">
                         <div className="bg-slate-900/90 p-8 rounded-3xl border border-cyan-500/50 shadow-2xl flex flex-col items-center animate-bounce-slight">
@@ -359,6 +436,46 @@ export default function App() {
                 )}
 
             </div>
+
+            {/* Incoming Transfer Modal */}
+            {incomingTransfer && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md animate-in fade-in zoom-in duration-200">
+                    <div className={`w-96 p-6 rounded-3xl ${glassClass} flex flex-col items-center text-center`}>
+                        <div className="w-16 h-16 rounded-full bg-cyan-500/20 flex items-center justify-center mb-4 animate-bounce">
+                            <Download size={32} className="text-cyan-400" />
+                        </div>
+                        <h2 className="text-xl font-bold text-white mb-1">Receber ficheiro</h2>
+                        <p className="text-slate-400 text-sm mb-6">
+                            <span className="text-white font-semibold">{incomingTransfer.sender_name}</span> quer enviar-te <br />
+                            <span className="text-cyan-300 font-mono bg-cyan-500/10 px-2 py-0.5 rounded">{incomingTransfer.filename}</span>
+                        </p>
+
+                        {isReceiving ? (
+                            <div className="w-full space-y-3">
+                                <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                                    <div className="h-full bg-cyan-500 animate-pulse w-full"></div>
+                                </div>
+                                <p className="text-xs text-slate-400">A fazer download...</p>
+                            </div>
+                        ) : (
+                            <div className="flex gap-3 w-full">
+                                <button
+                                    onClick={() => setIncomingTransfer(null)}
+                                    className="flex-1 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-medium transition-colors"
+                                >
+                                    Recusar
+                                </button>
+                                <button
+                                    onClick={handleAcceptTransfer}
+                                    className="flex-1 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold transition-colors"
+                                >
+                                    Aceitar
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Settings Modal */}
             {showSettings && (
@@ -372,12 +489,18 @@ export default function App() {
                         </div>
                         <div className="space-y-4">
                             <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                <label className="text-sm text-slate-400">Nome do dispositivo</label>
-                                <p className="text-white font-medium">{myDeviceName}</p>
+                                <label className="text-sm text-slate-400 block mb-2">Nome do dispositivo</label>
+                                <input
+                                    type="text"
+                                    value={tempDeviceName}
+                                    onChange={(e) => setTempDeviceName(e.target.value)}
+                                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg p-2 text-white focus:outline-none focus:border-cyan-500 transition-colors"
+                                    placeholder="Ex: My Laptop"
+                                />
                             </div>
                             <div className="p-4 rounded-xl bg-white/5 border border-white/10">
                                 <label className="text-sm text-slate-400">Porta de descoberta</label>
-                                <p className="text-white font-medium">8080</p>
+                                <p className="text-white font-medium">8080 (Fixo)</p>
                             </div>
                             <div className="p-4 rounded-xl bg-white/5 border border-white/10">
                                 <label className="text-sm text-slate-400">Versão</label>
@@ -385,10 +508,11 @@ export default function App() {
                             </div>
                         </div>
                         <button
-                            onClick={() => setShowSettings(false)}
-                            className="w-full mt-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold transition-colors"
+                            onClick={handleSaveSettings}
+                            className="w-full mt-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold transition-colors flex items-center justify-center gap-2"
                         >
-                            Fechar
+                            <Save size={18} />
+                            Guardar
                         </button>
                     </div>
                 </div>
@@ -404,32 +528,26 @@ export default function App() {
                                 <X size={20} className="text-slate-400" />
                             </button>
                         </div>
-                        <div className="flex-1 overflow-y-auto space-y-3">
+                        <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
                             {transferHistory.length === 0 ? (
-                                <div className="text-center py-8 text-slate-400">
-                                    <History size={32} className="mx-auto mb-3 opacity-50" />
-                                    <p>Sem transferências recentes</p>
-                                </div>
+                                <p className="text-slate-500 text-center py-8">Sem transferências recentes</p>
                             ) : (
                                 transferHistory.map((item, i) => (
-                                    <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10">
-                                        <div className="flex items-center gap-2">
-                                            <Check size={16} className={item.success ? "text-green-400" : "text-red-400"} />
-                                            <span className="text-white font-medium truncate">{item.name}</span>
+                                    <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10 flex items-center gap-3">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${item.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                                            {item.success ? <Check size={14} /> : <X size={14} />}
                                         </div>
-                                        <p className="text-xs text-slate-400 mt-1">
-                                            Para: {item.device} • {item.time}
-                                        </p>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-white text-sm font-medium truncate">{item.name}</p>
+                                            <div className="flex justify-between items-center text-xs text-slate-400">
+                                                <span>{item.device}</span>
+                                                <span>{item.time}</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 ))
                             )}
                         </div>
-                        <button
-                            onClick={() => setShowHistory(false)}
-                            className="w-full mt-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold transition-colors"
-                        >
-                            Fechar
-                        </button>
                     </div>
                 </div>
             )}
@@ -438,72 +556,51 @@ export default function App() {
     );
 }
 
-// Subcomponente para os Dispositivos
+// Subcomponente simples para dispositivo
 function DeviceCard({ device, index, total, onSend }: { device: UIDevice, index: number, total: number, onSend: () => void }) {
-    const Icon = device.type === 'mobile' ? Smartphone : device.type === 'laptop' ? Laptop : Monitor;
+    // Calcular posição em círculo
+    const angle = (index / total) * 2 * Math.PI;
+    const radius = 140; // Distância do centro
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
 
-    // Posicionamento Matemático (Circular)
-    const angle = total === 1 ? -90 : (index * (360 / total)) - 90;
-    const radius = 160; // Distância do centro
+    const Icon = device.type === 'mobile' ? Smartphone : device.type === 'desktop' ? Monitor : Laptop;
 
     return (
         <div
-            className="absolute top-1/2 left-1/2 pointer-events-auto transition-all duration-700 ease-out"
+            className="absolute transition-all duration-500"
             style={{
-                transform: `translate(-50%, -50%) rotate(${angle}deg) translate(${radius}px) rotate(-${angle}deg)`
+                transform: `translate(${x}px, ${y}px)`,
+                left: '50%',
+                top: '50%'
             }}
         >
-            <div className="group relative flex flex-col items-center gap-3">
+            <div className={`relative group -translate-x-1/2 -translate-y-1/2 flex flex-col items-center cursor-pointer pointer-events-auto`} onClick={onSend}>
 
-                {/* Connection Line (Visual Only) */}
-                <div className={`absolute top-1/2 left-1/2 w-[160px] h-[1px] bg-gradient-to-r from-cyan-500/0 via-cyan-500/20 to-cyan-500/0 -z-10 origin-left transition-all duration-500
-          ${device.status === 'sending' ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-0'}
-        `} style={{ transform: `rotate(${angle + 180}deg)` }}></div>
+                {/* Status Indicator Ring */}
+                {device.status === 'sending' && (
+                    <svg className="absolute -inset-2 w-[calc(100%+16px)] h-[calc(100%+16px)] -rotate-90 pointer-events-none">
+                        <circle cx="50%" cy="50%" r="28" stroke="currentColor" strokeWidth="2" fill="none" className="text-slate-700" />
+                        <circle cx="50%" cy="50%" r="28" stroke="currentColor" strokeWidth="2" fill="none" className="text-cyan-400 transition-all duration-300"
+                            strokeDasharray="176"
+                            strokeDashoffset={176 - (176 * device.progress) / 100}
+                        />
+                    </svg>
+                )}
 
-                {/* Card Body */}
-                <button
-                    onClick={onSend}
-                    disabled={device.status !== 'idle'}
-                    className={`relative p-4 rounded-2xl transition-all duration-300 cursor-pointer group
-            ${device.status === 'idle' ? 'hover:scale-105 hover:-translate-y-1' : ''}
-          `}
-                >
-                    {/* Glass Background of Icon */}
-                    <div className={`w-16 h-16 rounded-2xl flex items-center justify-center backdrop-blur-md border shadow-xl relative z-10 transition-colors duration-300
-            ${device.status === 'sending' ? 'bg-slate-900 border-cyan-500/50' : 'bg-white/5 border-white/10 group-hover:bg-white/10 group-hover:border-white/30'}
-          `}>
-                        {device.status === 'success' ? (
-                            <Check className="text-green-400 animate-slide-in" size={32} />
-                        ) : (
-                            <Icon className={`text-white transition-opacity duration-300 ${device.status === 'sending' ? 'opacity-50' : 'opacity-100'}`} size={32} />
-                        )}
-
-                        {/* Progress Ring */}
-                        {device.status === 'sending' && (
-                            <svg className="absolute inset-0 w-full h-full -rotate-90 scale-110" viewBox="0 0 36 36">
-                                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#1e293b" strokeWidth="2" />
-                                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#06b6d4" strokeWidth="2" strokeDasharray={`${device.progress}, 100`} />
-                            </svg>
-                        )}
-                    </div>
-
-                    {/* Status Indicator Dot */}
-                    <div className={`absolute -top-1 -right-1 w-4 h-4 rounded-full border-2 border-slate-900 z-20 flex items-center justify-center
-            ${device.status === 'idle' ? 'bg-green-500' : device.status === 'sending' ? 'bg-cyan-500' : 'bg-blue-500'}
-          `}>
-                        {device.status === 'sending' && <div className="w-2 h-2 bg-white rounded-full animate-ping"></div>}
-                    </div>
-
-                </button>
-
-                {/* Label */}
-                <div className={`text-center transition-all duration-300 ${device.status === 'idle' ? 'opacity-60 group-hover:opacity-100' : 'opacity-100'}`}>
-                    <p className="font-semibold text-sm text-white drop-shadow-md whitespace-nowrap">{device.name}</p>
-                    <p className="text-xs text-cyan-300 font-medium">
-                        {device.status === 'sending' ? `${device.progress}% a enviar...` : device.status === 'success' ? 'Enviado!' : ''}
-                    </p>
+                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border shadow-xl transition-all duration-300
+                    ${device.status === 'success' ? 'bg-green-500 text-white border-green-400 scale-110' :
+                        device.status === 'sending' ? 'bg-slate-800 text-cyan-400 border-cyan-500/50' :
+                            'bg-slate-800/80 backdrop-blur text-slate-300 border-white/10 hover:bg-slate-700 hover:text-white hover:scale-110 hover:border-cyan-500/30'}
+                `}>
+                    {device.status === 'success' ? <Check size={24} /> : <Icon size={24} />}
                 </div>
 
+                <div className="absolute top-16 w-32 text-center pointer-events-none">
+                    <p className="text-xs font-bold text-white truncate shadow-black drop-shadow-md">{device.name}</p>
+                    <p className="text-xs text-slate-400">{device.ip}</p>
+                    {device.status === 'sending' && <p className="text-[10px] text-cyan-400 font-bold">{device.progress}%</p>}
+                </div>
             </div>
         </div>
     );

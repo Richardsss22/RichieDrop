@@ -1,16 +1,10 @@
-use axum::{
-    body::Body,
-    http::{header, StatusCode},
-    response::Response,
-    routing::get_service,
-    Router,
-};
+use axum::{extract::Json, http::StatusCode, routing::post, Router};
 use local_ip_address::local_ip;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Listener, Manager};
+use tauri::Emitter;
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeFile;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
@@ -22,10 +16,16 @@ pub struct Device {
     last_seen: u64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct NotifyPayload {
+    filename: String,
+    filesize: String,
+    sender_name: String,
+    download_url: String,
+}
+
 struct AppState {
     devices: Arc<Mutex<HashMap<String, Device>>>,
-    // Store current server task to abort if needed?
-    // For now, simpler: one file served at a time or concurrent is fine.
 }
 
 #[derive(serde::Serialize)]
@@ -47,21 +47,39 @@ async fn start_discovery(
     let ip_str = my_ip.to_string();
     let service_type = "_richiedrop._tcp.local.";
     let instance_name = &device_name;
-    let host_name = format!("{}.local.", device_name.replace(" ", "-")); // simple sanitization
+    let host_name = format!("{}.local.", device_name.replace(" ", "-"));
 
-    let service_info = ServiceInfo::new(
-        service_type,
-        instance_name,
-        &host_name,
-        &ip_str,
-        port,
-        None, // properties
-    )
-    .map_err(|e| e.to_string())?;
+    let service_info =
+        ServiceInfo::new(service_type, instance_name, &host_name, &ip_str, port, None)
+            .map_err(|e| e.to_string())?;
 
     mdns.register(service_info).map_err(|e| e.to_string())?;
 
-    // 2. Browse for others
+    // 2. Start Control Server (Signaling) on the SAME port
+    let app_handle_server = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let app = Router::new()
+            .route(
+                "/notify",
+                post(move |Json(payload): Json<NotifyPayload>| async move {
+                    println!("Received transfer request: {:?}", payload);
+                    let _ = app_handle_server.emit("transfer-request", payload);
+                    StatusCode::OK
+                }),
+            )
+            .layer(CorsLayer::permissive()); // Allow CORS for local network logic
+
+        // Bind strict to the discovery port (e.g., 8080)
+        let addr = format!("0.0.0.0:{}", port);
+        if let Ok(listener) = tokio::net::TcpListener::bind(&addr).await {
+            println!("Control server listening on {}", addr);
+            let _ = axum::serve(listener, app).await;
+        } else {
+            eprintln!("Failed to bind control server on port {}", port);
+        }
+    });
+
+    // 3. Browse for others
     let receiver = mdns.browse(service_type).map_err(|e| e.to_string())?;
     let app_handle_clone = app_handle.clone();
     let my_ip_clone = my_ip.clone();
@@ -73,9 +91,8 @@ async fn start_discovery(
                     let id = info.get_fullname().to_string();
                     let addrs = info.get_addresses();
                     if let Some(addr) = addrs.iter().next() {
-                        // Filter out our own device by checking IP (compare as strings since types differ)
                         if addr.to_string() == my_ip_clone.to_string() {
-                            continue; // Skip self
+                            continue;
                         }
 
                         let device = Device {
@@ -105,9 +122,6 @@ async fn start_discovery(
 
 #[tauri::command]
 fn get_devices() -> Vec<Device> {
-    // In this simple implementation, we rely on the frontend listener for the live list.
-    // The initial get_devices call returns empty or we could cache in AppState.
-    // For simplicity of restoration: return empty, let discovery fill it.
     vec![]
 }
 
@@ -116,22 +130,7 @@ async fn send_file(
     _app_handle: tauri::AppHandle,
     filepath: String,
 ) -> Result<TransferResult, String> {
-    // Start an ephemeral HTTP server to serve this file
-    // Strategy: Bind to random port or fixed port?
-    // User logic calls start_discovery with 8080.
-    // Ideally we serve on 8080 (our discovery port).
-
-    // NOTE: In a real robust app, we should have the server running constantly.
-    // Here we'll spawn a server for this file specifically or reuse a global one.
-    // Given the complexity of checking if server is running, let's try to bind 8080.
-    // If it fails (already running), we might need to handle that.
-
-    // Simpler hack for this "Fix": bind strict 8080 in a separate task globally?
-    // Or just bind ephemeral port and return it (but discovery advertised 8080).
-
-    // Let's assume 8080 is THE port.
-    // We need to serve the file at /download/:filename
-
+    // Start ephemeral server for the file
     let path = std::path::PathBuf::from(filepath.clone());
     if !path.exists() {
         return Err("File not found".to_string());
@@ -142,21 +141,12 @@ async fn send_file(
         .to_string_lossy()
         .to_string();
 
-    // We need to serve this file.
-    // To support dynamic file serving, we'd need a shared state of "files to serve".
-    // Implementing a full server is complex in one go.
-    // Let's implement a "start server if not started" approach?
-    // Or just spawn a server on a RANDOM port and return THAT port?
-    // The frontend logic: `alert` shows `result.port`.
-    // So dynamic port is ACCEPTABLE and SAFER.
-
     let ip = local_ip().map_err(|e| e.to_string())?.to_string();
 
-    // Create a router that serves this specific file
-    let app =
-        Router::new().nest_service(&format!("/download/{}", filename), ServeFile::new(filepath));
+    let app = Router::new()
+        .nest_service(&format!("/download/{}", filename), ServeFile::new(filepath))
+        .layer(CorsLayer::permissive());
 
-    // Bind to port 0 (random)
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
         .await
         .map_err(|e| e.to_string())?;
@@ -170,12 +160,41 @@ async fn send_file(
 }
 
 #[tauri::command]
+async fn notify_peer(
+    target_ip: String,
+    target_port: u16,
+    filename: String,
+    filesize: String,
+    sender_name: String,
+    download_url: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let url = format!("http://{}:{}/notify", target_ip, target_port);
+
+    let payload = NotifyPayload {
+        filename,
+        filesize,
+        sender_name,
+        download_url,
+    };
+
+    let _res = client
+        .post(url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn receive_file(url: String, save_path: String) -> Result<(), String> {
     let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
     let mut file = tokio::fs::File::create(save_path)
         .await
         .map_err(|e| e.to_string())?;
-    // Stream content
+
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -196,7 +215,8 @@ pub fn run() {
             start_discovery,
             get_devices,
             send_file,
-            receive_file
+            receive_file,
+            notify_peer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
