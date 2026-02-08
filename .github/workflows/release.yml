@@ -43,7 +43,7 @@ jobs:
         working-directory: ./android/android
         env:
           NODE_ENV: production
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease -PkotlinVersion=1.9.25 --no-daemon
 
       - name: 🔍 Debug APK Location
         working-directory: ./android
