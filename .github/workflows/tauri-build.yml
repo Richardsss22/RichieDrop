@@ -1,9 +1,10 @@
-name: tauri-build
+name: tauri-release
 
 on:
-  workflow_dispatch:
   push:
-    branches: ["main"]
+    tags:
+      - "v*.*.*"   # só corre quando fazes tag vX.Y.Z
+  workflow_dispatch:
 
 jobs:
   build:
@@ -46,9 +47,10 @@ jobs:
           CI: true
         run: npm run tauri build
 
-      - name: Upload bundles
-        uses: actions/upload-artifact@v4
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: bundles-${{ matrix.os }}
-          path: |
-            src-tauri/target/**/release/bundle/**
+          files: |
+            src-tauri/target/**/release/bundle/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
