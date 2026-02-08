@@ -31,7 +31,9 @@ jobs:
 
       - name: 📦 Install dependencies
         working-directory: ./android
-        run: npm install
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
 
       - name: 📱 Prebuild
         working-directory: ./android
