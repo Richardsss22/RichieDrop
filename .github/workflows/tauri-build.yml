@@ -6,6 +6,9 @@ on:
       - "v*.*.*"   # só corre quando fazes tag vX.Y.Z
   workflow_dispatch:
 
+permissions:
+  contents: write
+  
 jobs:
   build:
     strategy:
