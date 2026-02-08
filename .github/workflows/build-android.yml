@@ -20,25 +20,29 @@ jobs:
         with:
           node-version: '20'
       
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
       - name: 📦 Install dependencies
         working-directory: ./android
         run: npm install
       
-      - name: 🔧 Setup EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-      
-      - name: 📱 Build APK
+      - name: 📱 Generate native Android project
         working-directory: ./android
-        run: eas build --platform android --profile preview --non-interactive --local
+        run: npx expo prebuild --platform android --clean
+      
+      - name: 🔨 Build APK
+        working-directory: ./android/android
+        run: ./gradlew assembleRelease
       
       - name: 📤 Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: richiedrop-android
-          path: android/build-*.apk
+          path: android/android/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
   release:
