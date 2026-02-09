@@ -1,15 +1,22 @@
 /**
  * Root Layout for Expo Router
+ *
+ * CRITICAL: This file must NOT import from '@/components' barrel file!
+ * Doing so triggers premature loading of complex native dependencies (Reanimated, SVG)
+ * which can crash the app on startup before the root view is mounted.
  */
 
 import { Stack } from 'expo-router';
+// Import StatusBar safely if needed, but standard import should be fine
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { ErrorBoundary } from '@/components';
+
+// Import directly from file to avoid barrel file side-effects
+import { SimpleErrorBoundary } from '../src/components/SimpleErrorBoundary';
 
 export default function RootLayout() {
     return (
-        <ErrorBoundary>
+        <SimpleErrorBoundary>
             <SafeAreaProvider>
                 <StatusBar style="light" />
                 <Stack
@@ -20,6 +27,6 @@ export default function RootLayout() {
                     }}
                 />
             </SafeAreaProvider>
-        </ErrorBoundary>
+        </SimpleErrorBoundary>
     );
 }
