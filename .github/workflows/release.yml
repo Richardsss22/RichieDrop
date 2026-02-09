@@ -39,18 +39,14 @@ jobs:
         working-directory: ./android
         run: npx expo prebuild --platform android --clean
 
-      - name: 🔧 Patch Kotlin Version (Script)
+      - name: 🔧 Patch Gradle Properties
         run: |
-          # Make script executable just in case
-          chmod +x scripts/fix-kotlin.cjs
-          
-          # Run patching script
-          node scripts/fix-kotlin.cjs
-          
-          # Also append gradle.properties just to be safe
+          # Append local gradle.properties to generated android folder (DO NOT OVERWRITE)
           if [ -f "android/gradle.properties" ]; then
              echo "" >> android/android/gradle.properties
-             echo "kotlinVersion=1.9.25" >> android/android/gradle.properties
+             # Also append memory settings just in case
+             echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m" >> android/android/gradle.properties
+             echo "android.useAndroidX=true" >> android/android/gradle.properties
           fi
 
       - name: 🔨 Build APK

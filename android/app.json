@@ -31,7 +31,15 @@
         },
         "plugins": [
             "expo-router",
-            "expo-document-picker"
+            "expo-document-picker",
+            [
+                "expo-build-properties",
+                {
+                    "android": {
+                        "kotlinVersion": "1.9.25"
+                    }
+                }
+            ]
         ],
         "extra": {
             "router": {
