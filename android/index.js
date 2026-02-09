@@ -1,7 +1,7 @@
 /**
- * RichieDrop Android - SAFE MODE (Manual Start)
+ * RichieDrop Android - DEBUG MODE
  * 
- * Prevents startup crash by waiting for user to start services.
+ * Includes explicit error alerts and checks for Buffer/Permissions.
  */
 
 import './shim'; // Must be first import
@@ -55,7 +55,7 @@ class UdpDiscoveryService {
         this.devices.clear();
         this.notify();
         this.isScanning = true;
-        this.log('[Discovery] Starting UDP...');
+        this.log('[UDP] Starting...');
 
         // Request Permissions on Android
         if (Platform.OS === 'android') {
@@ -66,18 +66,30 @@ class UdpDiscoveryService {
                     PermissionsAndroid.PERMISSIONS.INTERNET
                 ]);
             } catch (e) {
-                this.log('[Discovery] Perms error: ' + e.message);
+                this.log('[UDP] Perms Error: ' + e.message);
+                Alert.alert('Erro Permissões', e.message);
             }
         }
 
+        // Wait a bit to ensure permissions propagate
+        await new Promise(r => setTimeout(r, 500));
+
         try {
+            if (typeof Buffer === 'undefined') {
+                throw new Error("Buffer polyfill missing! (shim failed)");
+            }
+
             this.socket = dgram.createSocket({ type: 'udp4' });
             this.socket.bind(this.BROADCAST_PORT, (err) => {
-                if (err) return this.log('[Discovery] Bind failed: ' + err);
-                this.log('[Discovery] Bound to ' + this.BROADCAST_PORT);
+                if (err) {
+                    this.log('[UDP] Bind failed: ' + err);
+                    Alert.alert('Erro UDP Bind', String(err));
+                    return;
+                }
+                this.log('[UDP] Bound to ' + this.BROADCAST_PORT);
                 try {
                     this.socket.setBroadcast(true);
-                } catch (e) { this.log('[Discovery] setBroadcast fail: ' + e); }
+                } catch (e) { this.log('[UDP] setBroadcast fail: ' + e); }
             });
 
             this.socket.on('message', (msg, rinfo) => {
@@ -89,7 +101,7 @@ class UdpDiscoveryService {
 
                         const peerId = `${peerName}-${rinfo.address}`;
                         if (!this.devices.has(peerId)) {
-                            this.log(`[Discovery] Found: ${peerName} (${rinfo.address})`);
+                            this.log(`[UDP] Found: ${peerName} (${rinfo.address})`);
                             const device = {
                                 id: peerId,
                                 name: peerName,
@@ -106,6 +118,10 @@ class UdpDiscoveryService {
                 }
             });
 
+            this.socket.on('error', (err) => {
+                this.log('[UDP] Socket Error: ' + err);
+            });
+
             this.broadcastLoop = setInterval(() => {
                 if (!this.isScanning) return;
                 const message = `RICHIEDROP:${this.deviceName}`;
@@ -117,7 +133,9 @@ class UdpDiscoveryService {
             }, 3000);
 
         } catch (e) {
-            this.log('[Discovery] Setup crash: ' + e.message);
+            this.log('[UDP] CRASH: ' + e.message);
+            Alert.alert('Erro Fatal UDP', e.message);
+            throw e; // Propagate to toggleService catch
         }
     }
 
@@ -128,7 +146,7 @@ class UdpDiscoveryService {
             try { this.socket.close(); } catch (e) { }
             this.socket = null;
         }
-        this.log('[Discovery] Stopped');
+        this.log('[UDP] Stopped');
     }
 
     subscribe(callback) {
@@ -163,6 +181,8 @@ class TcpTransferService {
         this.deviceName = name;
         this.log('[TCP] Starting Server...');
         try {
+            if (typeof Buffer === 'undefined') throw new Error("Buffer missing for TCP");
+
             this.server = TcpSocket.createServer((socket) => {
                 this.log(`[TCP] Connection from ${socket.remoteAddress}`);
 
@@ -179,9 +199,14 @@ class TcpTransferService {
                 this.log('[TCP] Listening on 8080');
             });
 
-            this.server.on('error', (error) => this.log('[TCP] Server error: ' + error));
+            this.server.on('error', (error) => {
+                this.log('[TCP] Server error: ' + error);
+                Alert.alert('Erro TCP Server', String(error));
+            });
         } catch (e) {
             this.log('[TCP] Server Crash: ' + e.message);
+            Alert.alert('Erro Fatal TCP', e.message);
+            throw e;
         }
     }
 
@@ -269,9 +294,17 @@ function App() {
     useEffect(() => {
         discovery.setLogger(addLog);
         transfer.setLogger(addLog);
+
+        // Initial Check
+        if (typeof Buffer !== 'undefined') {
+            addLog('✅ Polyfill Buffer OK');
+        } else {
+            addLog('❌ Polyfill Buffer MISSING');
+            Alert.alert('Erro Crítico', 'Buffer não encontrado!');
+        }
     }, []);
 
-    const toggleService = () => {
+    const toggleService = async () => {
         if (running) {
             discovery.stop();
             transfer.stopServer();
@@ -280,11 +313,24 @@ function App() {
         } else {
             addLog('🚀 A iniciar serviços...');
             try {
-                discovery.start(deviceName);
-                transfer.startServer(deviceName);
+                // Try UDP
+                try {
+                    await discovery.start(deviceName);
+                } catch (e) {
+                    addLog('❌ UDP Falhou: ' + e.message);
+                }
+
+                // Try TCP
+                try {
+                    transfer.startServer(deviceName);
+                } catch (e) {
+                    addLog('❌ TCP Falhou: ' + e.message);
+                }
+
                 setRunning(true);
             } catch (e) {
-                addLog('❌ Falha ao iniciar: ' + e.message);
+                addLog('❌ Falha Geral: ' + e.message);
+                Alert.alert('Erro Geral', e.message);
             }
         }
     };
@@ -304,7 +350,7 @@ function App() {
             if (!res.canceled && res.assets && res.assets.length > 0) {
                 const file = res.assets[0];
                 setSelectedFile(file);
-                addLog('Ficheiro selecionado: ' + file.name);
+                addLog('Ficheiro: ' + file.name);
             }
         } catch (e) {
             Alert.alert('Erro', 'Falha ao selecionar ficheiro');
@@ -324,6 +370,7 @@ function App() {
             addLog('Envio concluído (simulado)');
         } catch (e) {
             addLog(`Erro envio: ${e.message}`);
+            Alert.alert('Erro Envio', e.message);
         }
     };
 
@@ -341,7 +388,7 @@ function App() {
                         <Share2 size={24} color="#22d3ee" />
                     </View>
                     <View>
-                        <Text style={styles.appName}>RichieDrop</Text>
+                        <Text style={styles.appName}>RichieDrop Safe</Text>
                         <View style={styles.statusRow}>
                             <View style={[styles.statusDot, { backgroundColor: running ? '#22c55e' : '#ef4444' }]} />
                             <Text style={styles.statusText}>{running ? `Visível: ${deviceName}` : 'Offline'}</Text>
@@ -356,10 +403,11 @@ function App() {
             </View>
 
             {/* Logs Area (Debug) */}
-            <View style={{ height: 60, marginBottom: 10, marginHorizontal: 20, backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 8 }}>
+            <View style={{ height: 100, marginBottom: 10, marginHorizontal: 20, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
                 <ScrollView contentContainerStyle={{ padding: 5 }}>
+                    {logs.length === 0 && <Text style={{ color: '#666' }}>A aguardar logs...</Text>}
                     {logs.map((l, i) => (
-                        <Text key={i} style={{ color: '#aaa', fontSize: 10 }}>{l}</Text>
+                        <Text key={i} style={{ color: '#ddd', fontSize: 11, fontFamily: 'monospace' }}>{l}</Text>
                     ))}
                 </ScrollView>
             </View>
@@ -399,7 +447,7 @@ function App() {
                     })}
 
                     {devices.length === 0 && running && (
-                        <Text style={styles.searchingText}>A procurar dispositivos...</Text>
+                        <Text style={styles.searchingText}>A procurar dispositivos (UDP)...</Text>
                     )}
                     {!running && (
                         <Text style={styles.searchingText}>Toca no Play para iniciar</Text>
