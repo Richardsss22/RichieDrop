@@ -21,5 +21,10 @@ if (typeof localStorage !== 'undefined') {
     localStorage.debug = isDev ? '*' : '';
 }
 
+// Polyfill process.nextTick for streams (Critical for react-native-tcp-socket)
+if (!process.nextTick) {
+    process.nextTick = setImmediate ? setImmediate : (fn) => setTimeout(fn, 0);
+}
+
 // Polyfill globals 
 // import 'react-native-url-polyfill/auto'; 
