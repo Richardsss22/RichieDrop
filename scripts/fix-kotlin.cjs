@@ -70,21 +70,42 @@ if (fs.existsSync(nodeModulesPath)) {
     searchAndReplace(nodeModulesPath);
 } else {
     // Fallback if structure is flat (e.g. locally or different setup)
+    console.log('Searching for expo-modules-core in root node_modules...');
     searchAndReplace('./node_modules/expo-modules-core');
 }
 
-// 2. Append Resolution Strategy to Root build.gradle
+// Debug: List contents of android directory to confirm structure (user debugging)
+if (fs.existsSync('android')) {
+    console.log('List of android/ directory:', fs.readdirSync('android'));
+    if (fs.existsSync('android/android')) {
+        console.log('List of android/android/ directory:', fs.readdirSync('android/android'));
+    }
+}
+
+// 2. Modify Root build.gradle directly first (Variable Replacement)
 const rootBuildGradlePath = path.join('android', 'android', 'build.gradle');
 if (fs.existsSync(rootBuildGradlePath)) {
+    console.log(`Modifying root build.gradle at ${rootBuildGradlePath}`);
+    let rootContent = fs.readFileSync(rootBuildGradlePath, 'utf8');
+
+    // Replace kotlinVersion variable in buildscript ext
+    // Common pattern: ext { ... kotlinVersion = "1.9.24" ... }
+    if (rootContent.includes('kotlinVersion')) {
+        console.log('Found kotlinVersion variable, forcing to 1.9.25');
+        rootContent = rootContent.replace(/kotlinVersion\s*=\s*['"][\d.]+['"]/g, `kotlinVersion = "${KOTLIN_VERSION}"`);
+        fs.writeFileSync(rootBuildGradlePath, rootContent, 'utf8');
+    }
+
+    // 3. Append Resolution Strategy (Safety Net)
     console.log(`Appending resolution strategy to ${rootBuildGradlePath}`);
     const resolutionStrategy = `
 // FORCE KOTLIN VERSION (Added by fix-kotlin.cjs)
 allprojects {
     configurations.all {
         resolutionStrategy {
-            force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.25'
-            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.25'
-            force 'org.jetbrains.kotlin:kotlin-reflect:1.9.25'
+            force 'org.jetbrains.kotlin:kotlin-stdlib:${KOTLIN_VERSION}'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:${KOTLIN_VERSION}'
+            force 'org.jetbrains.kotlin:kotlin-reflect:${KOTLIN_VERSION}'
         }
     }
 }
@@ -93,14 +114,17 @@ subprojects {
         configurations.all {
             resolutionStrategy.eachDependency { details ->
                 if (details.requested.group == 'org.jetbrains.kotlin' && details.requested.name.startsWith('kotlin-gradle-plugin')) {
-                    details.useVersion '1.9.25'
+                    details.useVersion '${KOTLIN_VERSION}'
                 }
             }
         }
     }
 }
 `;
-    fs.appendFileSync(rootBuildGradlePath, resolutionStrategy, 'utf8');
+    // Only append if not already appended
+    if (!rootContent.includes('FORCE KOTLIN VERSION')) {
+        fs.appendFileSync(rootBuildGradlePath, resolutionStrategy, 'utf8');
+    }
 } else {
     console.warn(`Warning: Could not find root build.gradle at ${rootBuildGradlePath}`);
 }
