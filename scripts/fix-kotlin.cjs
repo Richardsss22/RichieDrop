@@ -53,7 +53,46 @@ function searchAndReplace(dir) {
     }
 }
 
-console.log('Starting Kotlin version patcher (Targeting 1.9.24 only)...');
+console.log('Starting Kotlin version patcher...');
+
+// 1. Regex Replace (Keep this as first line of defense)
+// searchAndReplace('./android'); // Moved below to process specific paths
+// searchAndReplace('./node_modules/expo-modules-core');
+
+// Process recursively
 searchAndReplace('./android');
 searchAndReplace('./node_modules/expo-modules-core');
+
+// 2. Append Resolution Strategy to Root build.gradle
+const rootBuildGradlePath = path.join('android', 'android', 'build.gradle');
+if (fs.existsSync(rootBuildGradlePath)) {
+    console.log(`Appending resolution strategy to ${rootBuildGradlePath}`);
+    const resolutionStrategy = `
+// FORCE KOTLIN VERSION (Added by fix-kotlin.cjs)
+allprojects {
+    configurations.all {
+        resolutionStrategy {
+            force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.25'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.25'
+            force 'org.jetbrains.kotlin:kotlin-reflect:1.9.25'
+        }
+    }
+}
+subprojects {
+    buildscript {
+        configurations.all {
+            resolutionStrategy.eachDependency { details ->
+                if (details.requested.group == 'org.jetbrains.kotlin' && details.requested.name.startsWith('kotlin-gradle-plugin')) {
+                    details.useVersion '1.9.25'
+                }
+            }
+        }
+    }
+}
+`;
+    fs.appendFileSync(rootBuildGradlePath, resolutionStrategy, 'utf8');
+} else {
+    console.warn(`Warning: Could not find root build.gradle at ${rootBuildGradlePath}`);
+}
+
 console.log('Done patching Kotlin versions.');
