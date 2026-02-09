@@ -1,397 +1,160 @@
 /**
  * RichieDrop Android - Main App Screen
  * File sharing app compatible with desktop version
+ * 
+ * IMPORTANT: This version uses lazy loading to prevent blank screen crashes
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import {
     View,
     Text,
     StyleSheet,
-    useWindowDimensions,
-    Alert,
     StatusBar,
+    ActivityIndicator,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LinearGradient } from 'expo-linear-gradient';
 
-import {
-    Header,
-    RadarView,
-    DeviceCard,
-    FilePanel,
-    TransferModal,
-    SettingsModal,
-    HistoryModal,
-    UIDevice,
-    SelectedFile,
-    TransferHistoryItem,
-} from '@/components';
+// Safe imports - these are core React Native and should always work
+let SafeAreaView: any;
+let LinearGradient: any;
+let AsyncStorage: any;
+let DocumentPicker: any;
+let FileSystem: any;
 
-import {
-    startDiscovery,
-    stopDiscovery,
-    onDeviceFound,
-    onDeviceLost,
-    Device,
-    sendFile,
-    receiveFile,
-    onTransferRequest,
-    setDeviceName,
-    TransferRequest,
-} from '@/services';
+// Try to import optional dependencies
+try {
+    SafeAreaView = require('react-native-safe-area-context').SafeAreaView;
+} catch (e) {
+    console.warn('SafeAreaView not available, using View');
+    SafeAreaView = View;
+}
 
-const STORAGE_KEY = 'richiedrop_name';
-const DEFAULT_PORT = 8080;
+try {
+    LinearGradient = require('expo-linear-gradient').LinearGradient;
+} catch (e) {
+    console.warn('LinearGradient not available');
+    LinearGradient = View;
+}
 
+try {
+    AsyncStorage = require('@react-native-async-storage/async-storage').default;
+} catch (e) {
+    console.warn('AsyncStorage not available');
+    AsyncStorage = {
+        getItem: async () => null,
+        setItem: async () => { },
+    };
+}
+
+try {
+    DocumentPicker = require('expo-document-picker');
+} catch (e) {
+    console.warn('DocumentPicker not available');
+    DocumentPicker = { getDocumentAsync: async () => ({ canceled: true }) };
+}
+
+try {
+    FileSystem = require('expo-file-system');
+} catch (e) {
+    console.warn('FileSystem not available');
+    FileSystem = { getInfoAsync: async () => ({ exists: false }) };
+}
+
+// Lazy load complex components
+const LazyMainContent = React.lazy(() => import('./MainContent'));
+
+// Loading screen component
+function LoadingScreen() {
+    return (
+        <View style={styles.loadingContainer}>
+            <StatusBar barStyle="light-content" backgroundColor="#0f172a" />
+            <ActivityIndicator size="large" color="#06b6d4" />
+            <Text style={styles.loadingText}>A carregar RichieDrop...</Text>
+        </View>
+    );
+}
+
+// Error fallback component
+function ErrorFallback({ error }: { error?: Error }) {
+    return (
+        <View style={styles.errorContainer}>
+            <StatusBar barStyle="light-content" backgroundColor="#0f172a" />
+            <Text style={styles.errorTitle}>⚠️ Ocorreu um erro</Text>
+            <Text style={styles.errorMessage}>
+                A aplicação encontrou um problema.
+            </Text>
+            {error && (
+                <Text style={styles.errorDetails}>{error.message}</Text>
+            )}
+            <Text style={styles.errorHint}>
+                Tenta reiniciar a aplicação.
+            </Text>
+        </View>
+    );
+}
+
+// Main screen wrapper with all safety checks
 export default function HomeScreen() {
-    const { width, height } = useWindowDimensions();
+    const [hasError, setHasError] = useState(false);
+    const [error, setError] = useState<Error | undefined>();
+    const [isReady, setIsReady] = useState(false);
 
-    // Device discovery state
-    const [myDeviceName, setMyDeviceName] = useState('Android');
-    const [foundDevices, setFoundDevices] = useState<UIDevice[]>([]);
-    const [scanning, setScanning] = useState(true);
-
-    // File selection state
-    const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
-
-    // Modal states
-    const [showSettings, setShowSettings] = useState(false);
-    const [showHistory, setShowHistory] = useState(false);
-
-    // Transfer state
-    const [incomingTransfer, setIncomingTransfer] = useState<TransferRequest | null>(null);
-    const [isReceiving, setIsReceiving] = useState(false);
-    const [transferHistory, setTransferHistory] = useState<TransferHistoryItem[]>([]);
-
-    // Initialize discovery
     useEffect(() => {
-        const init = async () => {
-            try {
-                // Load saved device name
-                let savedName = await AsyncStorage.getItem(STORAGE_KEY);
-                if (!savedName) {
-                    savedName = `Android-${Math.floor(Math.random() * 1000)}`;
-                    await AsyncStorage.setItem(STORAGE_KEY, savedName);
-                }
-                setMyDeviceName(savedName);
-                setDeviceName(savedName);
-
-                // Start mDNS discovery (may fail silently if native module unavailable)
-                await startDiscovery(savedName, DEFAULT_PORT);
-                setScanning(true);
-            } catch (error) {
-                console.warn('Initialization error:', error);
-                // Don't show alert - just continue without discovery
-                setScanning(false);
-            }
-        };
-
-        init();
-
-        // Cleanup
-        return () => {
-            try {
-                stopDiscovery();
-            } catch (e) {
-                // Ignore cleanup errors
-            }
-        };
+        // Mark as ready after a short delay to let things initialize
+        const timer = setTimeout(() => {
+            setIsReady(true);
+        }, 100);
+        return () => clearTimeout(timer);
     }, []);
 
-    // Listen for device events
-    useEffect(() => {
-        const unsubscribeFound = onDeviceFound((device: Device) => {
-            setFoundDevices((prev) => {
-                if (prev.find((d) => d.id === device.id)) return prev;
-                return [...prev, mapDeviceToUI(device)];
-            });
-        });
+    // If there was a loading error, show fallback
+    if (hasError) {
+        return <ErrorFallback error={error} />;
+    }
 
-        const unsubscribeLost = onDeviceLost((deviceId: string) => {
-            setFoundDevices((prev) => prev.filter((d) => d.id !== deviceId));
-        });
+    // Show loading while not ready
+    if (!isReady) {
+        return <LoadingScreen />;
+    }
 
-        const unsubscribeTransfer = onTransferRequest((request: TransferRequest) => {
-            setIncomingTransfer(request);
-        });
-
-        return () => {
-            unsubscribeFound();
-            unsubscribeLost();
-            unsubscribeTransfer();
-        };
-    }, []);
-
-    // Map Device to UIDevice
-    const mapDeviceToUI = (device: Device): UIDevice => {
-        const name = device.name.toLowerCase();
-        let type: UIDevice['type'] = 'laptop';
-        if (name.includes('iphone') || name.includes('android') || name.includes('mobile')) {
-            type = 'mobile';
-        } else if (name.includes('desktop') || name.includes('pc') || name.includes('windows')) {
-            type = 'desktop';
-        }
-
-        return {
-            ...device,
-            type,
-            status: 'idle',
-            progress: 0,
-        };
-    };
-
-    // Handle file selection
-    const handleSelectFile = async () => {
-        try {
-            const result = await DocumentPicker.getDocumentAsync({
-                type: '*/*',
-                copyToCacheDirectory: true,
-            });
-
-            if (!result.canceled && result.assets?.[0]) {
-                const asset = result.assets[0];
-                const fileInfo = await FileSystem.getInfoAsync(asset.uri);
-
-                setSelectedFiles((prev) => [
-                    ...prev,
-                    {
-                        name: asset.name,
-                        uri: asset.uri,
-                        size: fileInfo.exists && 'size' in fileInfo
-                            ? formatFileSize(fileInfo.size)
-                            : 'Tamanho desconhecido',
-                    },
-                ]);
-            }
-        } catch (error) {
-            console.error('Error picking document:', error);
-        }
-    };
-
-    // Format file size
-    const formatFileSize = (bytes: number): string => {
-        if (bytes < 1024) return `${bytes} B`;
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    };
-
-    // Remove file from selection
-    const handleRemoveFile = (index: number) => {
-        setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
-    };
-
-    // Clear all files
-    const handleClearFiles = () => {
-        setSelectedFiles([]);
-    };
-
-    // Send file to device
-    const handleSendToDevice = async (deviceId: string) => {
-        if (selectedFiles.length === 0) {
-            Alert.alert('Atenção', 'Seleciona um ficheiro primeiro');
-            return;
-        }
-
-        const device = foundDevices.find((d) => d.id === deviceId);
-        if (!device) return;
-
-        const file = selectedFiles[0];
-
-        // Update UI to sending state
-        setFoundDevices((prev) =>
-            prev.map((d) =>
-                d.id === deviceId ? { ...d, status: 'sending', progress: 0 } : d
-            )
-        );
-
-        try {
-            // Simulate progress
-            const progressInterval = setInterval(() => {
-                setFoundDevices((prev) =>
-                    prev.map((d) =>
-                        d.id === deviceId && d.status === 'sending'
-                            ? { ...d, progress: Math.min(d.progress + 5, 95) }
-                            : d
-                    )
-                );
-            }, 100);
-
-            await sendFile(device, file.uri, file.name, file.size || 'Unknown');
-
-            clearInterval(progressInterval);
-
-            // Success state
-            setFoundDevices((prev) =>
-                prev.map((d) =>
-                    d.id === deviceId ? { ...d, status: 'success', progress: 100 } : d
-                )
-            );
-
-            // Add to history
-            addToHistory(file.name, device.name, true);
-
-            // Reset after delay
-            setTimeout(() => {
-                setFoundDevices((prev) =>
-                    prev.map((d) =>
-                        d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
-                    )
-                );
-            }, 3000);
-        } catch (error) {
-            console.error('Send failed:', error);
-            Alert.alert('Erro', 'Falha ao enviar ficheiro');
-
-            setFoundDevices((prev) =>
-                prev.map((d) =>
-                    d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
-                )
-            );
-
-            addToHistory(file.name, device.name, false);
-        }
-    };
-
-    // Accept incoming transfer
-    const handleAcceptTransfer = async () => {
-        if (!incomingTransfer) return;
-
-        setIsReceiving(true);
-
-        try {
-            const savePath = `${FileSystem.documentDirectory}${incomingTransfer.filename}`;
-            await receiveFile(incomingTransfer.downloadUrl, savePath);
-
-            setIsReceiving(false);
-            setIncomingTransfer(null);
-
-            Alert.alert('Sucesso', 'Ficheiro recebido com sucesso!');
-            addToHistory(incomingTransfer.filename, incomingTransfer.senderName, true);
-        } catch (error) {
-            console.error('Receive failed:', error);
-            Alert.alert('Erro', 'Falha ao receber ficheiro');
-            setIsReceiving(false);
-        }
-    };
-
-    // Reject incoming transfer
-    const handleRejectTransfer = () => {
-        setIncomingTransfer(null);
-    };
-
-    // Add to transfer history
-    const addToHistory = (name: string, device: string, success: boolean) => {
-        const now = new Date();
-        const time = now.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
-
-        setTransferHistory((prev) =>
-            [{ name, device, time, success }, ...prev].slice(0, 20)
-        );
-    };
-
-    // Save settings
-    const handleSaveSettings = async (name: string) => {
-        await AsyncStorage.setItem(STORAGE_KEY, name);
-        setMyDeviceName(name);
-        setDeviceName(name);
-
-        // Restart discovery with new name
-        stopDiscovery();
-        await startDiscovery(name, DEFAULT_PORT);
-
-        setShowSettings(false);
-    };
-
-    // Calculate radar center
-    const radarCenterX = width / 2;
-    const radarCenterY = height * 0.35;
-
+    // Try to render main content with Suspense fallback
     return (
         <View style={styles.container}>
             <StatusBar barStyle="light-content" backgroundColor="#0f172a" />
-
-            {/* Background gradient */}
-            <LinearGradient
-                colors={['#0f172a', '#1e293b', '#0f172a']}
-                style={StyleSheet.absoluteFill}
-            />
-
-            {/* Ambient glow effects */}
-            <View style={[styles.glow, styles.glowPurple]} />
-            <View style={[styles.glow, styles.glowCyan]} />
-
-            <SafeAreaView style={styles.safeArea}>
-                {/* Header */}
-                <Header
-                    deviceName={myDeviceName}
-                    onHistoryPress={() => setShowHistory(true)}
-                    onSettingsPress={() => setShowSettings(true)}
-                />
-
-                {/* Radar section */}
-                <View style={styles.radarSection}>
-                    <RadarView scanning={scanning}>
-                        {foundDevices.map((device, index) => (
-                            <DeviceCard
-                                key={device.id}
-                                device={device}
-                                index={index}
-                                total={foundDevices.length}
-                                centerX={radarCenterX}
-                                centerY={140}
-                                radius={110}
-                                onPress={() => handleSendToDevice(device.id)}
-                            />
-                        ))}
-                    </RadarView>
-
-                    {foundDevices.length === 0 && (
-                        <Text style={styles.scanningText}>
-                            A procurar dispositivos próximos...
-                        </Text>
-                    )}
-                </View>
-
-                {/* File panel */}
-                <View style={styles.fileSection}>
-                    <FilePanel
-                        files={selectedFiles}
-                        onSelectFile={handleSelectFile}
-                        onRemoveFile={handleRemoveFile}
-                        onClearAll={handleClearFiles}
-                    />
-                </View>
-            </SafeAreaView>
-
-            {/* Modals */}
-            <TransferModal
-                visible={incomingTransfer !== null}
-                filename={incomingTransfer?.filename || ''}
-                filesize={incomingTransfer?.filesize || ''}
-                senderName={incomingTransfer?.senderName || ''}
-                isReceiving={isReceiving}
-                onAccept={handleAcceptTransfer}
-                onReject={handleRejectTransfer}
-            />
-
-            <SettingsModal
-                visible={showSettings}
-                deviceName={myDeviceName}
-                onSave={handleSaveSettings}
-                onClose={() => setShowSettings(false)}
-            />
-
-            <HistoryModal
-                visible={showHistory}
-                history={transferHistory}
-                onClose={() => setShowHistory(false)}
-            />
+            <Suspense fallback={<LoadingScreen />}>
+                <ErrorBoundaryWrapper onError={(e) => { setHasError(true); setError(e); }}>
+                    <LazyMainContent />
+                </ErrorBoundaryWrapper>
+            </Suspense>
         </View>
     );
+}
+
+// Simple error boundary wrapper
+class ErrorBoundaryWrapper extends React.Component<
+    { children: React.ReactNode; onError: (error: Error) => void },
+    { hasError: boolean }
+> {
+    constructor(props: any) {
+        super(props);
+        this.state = { hasError: false };
+    }
+
+    static getDerivedStateFromError() {
+        return { hasError: true };
+    }
+
+    componentDidCatch(error: Error) {
+        console.error('ErrorBoundaryWrapper caught:', error);
+        this.props.onError(error);
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return null;
+        }
+        return this.props.children;
+    }
 }
 
 const styles = StyleSheet.create({
@@ -399,40 +162,49 @@ const styles = StyleSheet.create({
         flex: 1,
         backgroundColor: '#0f172a',
     },
-    safeArea: {
+    loadingContainer: {
         flex: 1,
-        padding: 16,
-    },
-    glow: {
-        position: 'absolute',
-        width: 300,
-        height: 300,
-        borderRadius: 150,
-        opacity: 0.15,
-    },
-    glowPurple: {
-        top: -100,
-        left: -100,
-        backgroundColor: '#9333ea',
-    },
-    glowCyan: {
-        bottom: -100,
-        right: -100,
-        backgroundColor: '#06b6d4',
-    },
-    radarSection: {
-        flex: 1,
+        backgroundColor: '#0f172a',
         justifyContent: 'center',
         alignItems: 'center',
-        marginTop: 20,
     },
-    scanningText: {
-        position: 'absolute',
-        bottom: 40,
-        fontSize: 13,
+    loadingText: {
+        marginTop: 16,
+        fontSize: 16,
+        color: '#94a3b8',
+    },
+    errorContainer: {
+        flex: 1,
+        backgroundColor: '#0f172a',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 24,
+    },
+    errorTitle: {
+        fontSize: 24,
+        fontWeight: '700',
+        color: '#f87171',
+        marginBottom: 12,
+    },
+    errorMessage: {
+        fontSize: 16,
+        color: '#e2e8f0',
+        textAlign: 'center',
+        marginBottom: 8,
+    },
+    errorDetails: {
+        fontSize: 12,
+        color: '#94a3b8',
+        textAlign: 'center',
+        marginTop: 16,
+        padding: 12,
+        backgroundColor: 'rgba(248, 113, 113, 0.1)',
+        borderRadius: 8,
+        maxWidth: 300,
+    },
+    errorHint: {
+        fontSize: 14,
         color: '#64748b',
-    },
-    fileSection: {
-        paddingTop: 16,
+        marginTop: 24,
     },
 });
