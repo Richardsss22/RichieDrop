@@ -60,8 +60,18 @@ console.log('Starting Kotlin version patcher...');
 // searchAndReplace('./node_modules/expo-modules-core');
 
 // Process recursively
+// Process recursively
 searchAndReplace('./android');
-searchAndReplace('./node_modules/expo-modules-core');
+
+// Fix bug: node_modules is inside android/ folder in this repo structure
+const nodeModulesPath = path.join('android', 'node_modules', 'expo-modules-core');
+if (fs.existsSync(nodeModulesPath)) {
+    console.log(`Patching expo-modules-core at ${nodeModulesPath}`);
+    searchAndReplace(nodeModulesPath);
+} else {
+    // Fallback if structure is flat (e.g. locally or different setup)
+    searchAndReplace('./node_modules/expo-modules-core');
+}
 
 // 2. Append Resolution Strategy to Root build.gradle
 const rootBuildGradlePath = path.join('android', 'android', 'build.gradle');
