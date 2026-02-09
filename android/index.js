@@ -1,7 +1,8 @@
 /**
- * RichieDrop Android - NUCLEAR MAXIMUM + FEATURES (SAFE MODE)
+ * RichieDrop Android - UI MATCH UPDATE
  * 
- * ALL CODE INLINE - NO LAZY LOADING - NO DYNAMICS - NO NATIVE LIBS
+ * Matching Desktop UI (Dark Gradient, Dashed File Area)
+ * Safe Mode (Mock Discovery) to ensure stability
  */
 
 import { AppRegistry, LogBox } from 'react-native';
@@ -16,13 +17,16 @@ import {
     Dimensions,
     Animated,
     Easing,
-    Platform
+    Platform,
+    Image
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Settings, History, FileText, Smartphone, Monitor, CheckCircle, Share2, UploadCloud } from 'lucide-react-native';
 
-// LogBox.ignoreLogs(['new NativeEventEmitter']); 
+// Ignore specific logs
+LogBox.ignoreLogs(['new NativeEventEmitter']);
 
 // --- MOCK DISCOVERY SERVICE (SAFE MODE) ---
-// Native Zeroconf causes crashes on startup, using mock for UI validation
 class SafeDiscoveryService {
     deviceName = '';
     isScanning = false;
@@ -30,30 +34,24 @@ class SafeDiscoveryService {
     listeners = [];
     mockInterval = null;
 
-    constructor() {
-        console.log('[Discovery] Safe/Mock instance created');
-    }
-
     async start(name) {
         this.deviceName = name;
         this.devices.clear();
         this.notify();
         this.isScanning = true;
-        console.log('[Discovery] Started scanning (MOCK)');
 
-        // Simulate finding a device after 2 seconds
+        // Mock finding a device
         this.mockInterval = setTimeout(() => {
             if (!this.isScanning) return;
             const mockDevice = {
-                id: 'mock-macbook',
-                name: "Ricardo's MacBook Pro (Mock)",
-                ip: '192.168.1.50',
+                id: 'mock-mac-air',
+                name: "MAC AIR",
+                ip: '192.168.1.100',
                 type: 'computer'
             };
-            console.log('[Discovery] Found mock device:', mockDevice.name);
             this.devices.set(mockDevice.name, mockDevice);
             this.notify();
-        }, 2500);
+        }, 2000);
     }
 
     stop() {
@@ -78,18 +76,19 @@ const discovery = new SafeDiscoveryService();
 
 // --- COMPONENTS ---
 
+// Animated Pulse Ring
 const RadarRing = ({ delay, duration }) => {
     const scale = useRef(new Animated.Value(0)).current;
-    const opacity = useRef(new Animated.Value(0.5)).current;
+    const opacity = useRef(new Animated.Value(0.3)).current;
 
     useEffect(() => {
         const animate = () => {
             scale.setValue(0);
-            opacity.setValue(0.5);
+            opacity.setValue(0.3);
 
             Animated.parallel([
                 Animated.timing(scale, {
-                    toValue: 2.5,
+                    toValue: 3,
                     duration: duration,
                     easing: Easing.out(Easing.ease),
                     useNativeDriver: true,
@@ -112,7 +111,6 @@ const RadarRing = ({ delay, duration }) => {
             style={[
                 styles.radarRing,
                 {
-                    backfaceVisibility: 'hidden', // optimization
                     transform: [{ scale }],
                     opacity
                 }
@@ -123,19 +121,13 @@ const RadarRing = ({ delay, duration }) => {
 
 // Main App Component
 function App() {
-    // Generate a random name if not stored
     const [deviceName] = useState(`Android-${Math.floor(Math.random() * 1000)}`);
     const [devices, setDevices] = useState([]);
     const [selectedFile, setSelectedFile] = useState(null);
 
-    // Start discovery on mount
     useEffect(() => {
-        console.log('App Mounted, starting discovery...');
         discovery.start(deviceName);
-        const unsub = discovery.subscribe((updatedDevices) => {
-            setDevices(updatedDevices);
-        });
-
+        const unsub = discovery.subscribe(setDevices);
         return () => {
             unsub();
             discovery.stop();
@@ -143,190 +135,290 @@ function App() {
     }, []);
 
     const handleSelectFile = () => {
-        // Placeholder for now
-        Alert.alert('Selecionar Ficheiro', 'A abrir seletor de ficheiros (Simulado)...');
+        Alert.alert('Selecionar', 'Abrir seletor de ficheiros...');
+        // Mock selection
+        setTimeout(() => setSelectedFile("foto_ferias.jpg"), 500);
     };
 
-    const handleSend = (targetDevice) => {
-        Alert.alert('Enviar', `Enviar ficheiro para ${targetDevice.name}?`);
+    const handleSend = (target) => {
+        Alert.alert('Enviar', `Enviar ${selectedFile || 'ficheiro'} para ${target.name}?`);
     };
 
     return (
-        <View style={styles.container}>
-            <StatusBar barStyle="light-content" backgroundColor="#0f172a" />
+        <LinearGradient
+            colors={['#1e1b4b', '#0f172a', '#020617']} // Dark Purple to Black gradient
+            style={styles.container}
+        >
+            <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
             {/* Header */}
             <View style={styles.header}>
-                <Text style={styles.headerTitle}>📡 RichieDrop</Text>
-                <View style={[styles.statusBadge, { backgroundColor: '#22c55e' }]}>
-                    <Text style={styles.statusText}>Visível como {deviceName}</Text>
+                <View style={styles.headerLeft}>
+                    <View style={styles.logoBadge}>
+                        <Share2 size={24} color="#22d3ee" />
+                    </View>
+                    <View>
+                        <Text style={styles.appName}>RichieDrop</Text>
+                        <View style={styles.statusRow}>
+                            <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
+                            <Text style={styles.statusText}>Visível como "{deviceName}"</Text>
+                        </View>
+                    </View>
+                </View>
+                <View style={styles.headerRight}>
+                    <Pressable style={styles.iconButton}>
+                        <History size={20} color="#94a3b8" />
+                    </Pressable>
+                    <Pressable style={styles.iconButton}>
+                        <Settings size={20} color="#94a3b8" />
+                    </Pressable>
                 </View>
             </View>
 
-            {/* Radar Section (Center) */}
-            <View style={styles.radarContainer}>
-                {/* Rings */}
-                <RadarRing delay={0} duration={3000} />
-                <RadarRing delay={1000} duration={3000} />
-                <RadarRing delay={2000} duration={3000} />
+            {/* Main Content: Split into Radar and File Area */}
+            <View style={styles.content}>
 
-                {/* Center / Me */}
-                <View style={styles.meCircle}>
-                    <Text style={styles.meIcon}>📱</Text>
+                {/* Radar Section */}
+                <View style={styles.radarSection}>
+                    <RadarRing delay={0} duration={3000} />
+                    <RadarRing delay={1000} duration={3000} />
+
+                    {/* Me Node */}
+                    <View style={styles.meNode}>
+                        <Smartphone size={32} color="#fff" />
+                    </View>
+
+                    {/* Devices */}
+                    {devices.map((device, i) => {
+                        // Orbit logic
+                        const angle = (i * (360 / (devices.length || 1))) * (Math.PI / 180);
+                        const radius = 120;
+                        const x = Math.cos(angle) * radius;
+                        const y = Math.sin(angle) * radius;
+
+                        return (
+                            <Pressable
+                                key={device.id}
+                                style={[styles.deviceNode, { transform: [{ translateX: x }, { translateY: y }] }]}
+                                onPress={() => handleSend(device)}
+                            >
+                                <View style={styles.deviceIconBg}>
+                                    <Monitor size={24} color="#22d3ee" />
+                                </View>
+                                <Text style={styles.deviceLabel}>{device.name}</Text>
+                            </Pressable>
+                        );
+                    })}
+
+                    {devices.length === 0 && (
+                        <Text style={styles.searchingText}>A procurar dispositivos próximos...</Text>
+                    )}
                 </View>
 
-                {/* Orbiting Devices */}
-                {devices.map((device, index) => {
-                    // Simple logic to position devices around the center
-                    // standard angles based on index
-                    const angle = (index * (360 / (devices.length || 1))) * (Math.PI / 180);
-                    const radius = 140; // distance from center
-                    const x = Math.cos(angle) * radius;
-                    const y = Math.sin(angle) * radius;
-
-                    return (
-                        <Pressable
-                            key={device.id}
-                            style={[styles.deviceNode, { transform: [{ translateX: x }, { translateY: y }] }]}
-                            onPress={() => handleSend(device)}
-                        >
-                            <View style={styles.deviceIconCircle}>
-                                <Text style={styles.deviceIcon}>💻</Text>
+                {/* File Drop Area (Replicated from screenshot) */}
+                <View style={styles.fileAreaContainer}>
+                    <Pressable style={styles.fileDropZone} onPress={handleSelectFile}>
+                        {selectedFile ? (
+                            <View style={styles.fileSelectedState}>
+                                <CheckCircle size={40} color="#22c55e" />
+                                <Text style={styles.fileSelectedText}>{selectedFile}</Text>
+                                <Text style={styles.fileSubText}>Toque para mudar</Text>
                             </View>
-                            <Text style={styles.deviceName}>{device.name}</Text>
-                        </Pressable>
-                    );
-                })}
+                        ) : (
+                            <>
+                                <View style={styles.uploadIconCircle}>
+                                    <FileText size={24} color="#22d3ee" />
+                                </View>
+                                <Text style={styles.dropMainText}>Arrasta ficheiros</Text>
+                                <Text style={styles.dropSubText}>ou clica para explorar</Text>
+                                <View style={styles.selectButton}>
+                                    <Text style={styles.selectButtonText}>Selecionar</Text>
+                                </View>
+                            </>
+                        )}
+                    </Pressable>
+                </View>
 
-                {devices.length === 0 && (
-                    <Text style={styles.scanningText}>A procurar dispositivos...</Text>
-                )}
             </View>
-
-            {/* File Actions */}
-            <View style={styles.footer}>
-                <Pressable style={styles.actionButton} onPress={handleSelectFile}>
-                    <Text style={styles.actionButtonText}>
-                        {selectedFile ? '📄 Ficheiro Selecionado' : 'PLUS Selecionar Ficheiro'}
-                    </Text>
-                </Pressable>
-            </View>
-        </View>
+        </LinearGradient>
     );
 }
 
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#0f172a', // Slate 900
     },
     header: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
         paddingTop: 60,
         paddingHorizontal: 20,
+        paddingBottom: 20,
+    },
+    headerLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+    },
+    logoBadge: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: 'rgba(34, 211, 238, 0.15)', // Cyan tint
+        justifyContent: 'center',
         alignItems: 'center',
     },
-    headerTitle: {
-        fontSize: 32,
-        fontWeight: '800',
-        color: '#f8fafc', // Slate 50
-        letterSpacing: -0.5,
+    appName: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#fff',
     },
-    statusBadge: {
-        marginTop: 8,
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderRadius: 20,
+    statusRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+    },
+    statusDot: {
+        width: 6,
+        height: 6,
+        borderRadius: 3,
     },
     statusText: {
-        color: '#ffffff',
         fontSize: 12,
-        fontWeight: '600',
+        color: '#94a3b8',
     },
-    radarContainer: {
+    headerRight: {
+        flexDirection: 'row',
+        gap: 8,
+    },
+    iconButton: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    content: {
+        flex: 1,
+        justifyContent: 'space-between',
+    },
+    radarSection: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        position: 'relative',
+        marginTop: 20,
     },
     radarRing: {
         position: 'absolute',
         width: 100,
         height: 100,
         borderRadius: 50,
-        borderColor: '#38bdf8', // Sky 400
-        borderWidth: 2,
+        borderWidth: 1,
+        borderColor: 'rgba(255, 255, 255, 0.1)',
+        backgroundColor: 'rgba(255, 255, 255, 0.02)',
     },
-    meCircle: {
+    meNode: {
         width: 80,
         height: 80,
         borderRadius: 40,
-        backgroundColor: '#3b82f6', // Blue 500
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)',
         justifyContent: 'center',
         alignItems: 'center',
         zIndex: 10,
-        shadowColor: '#3b82f6',
-        shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 0.5,
-        shadowRadius: 20,
-        elevation: 10,
     },
-    meIcon: {
-        fontSize: 36,
-    },
-    scanningText: {
+    searchingText: {
         position: 'absolute',
-        bottom: '20%',
-        color: '#94a3b8',
-        fontSize: 16,
+        bottom: 40,
+        color: 'rgba(255,255,255,0.3)',
+        fontSize: 14,
     },
     deviceNode: {
         position: 'absolute',
         alignItems: 'center',
         zIndex: 20,
     },
-    deviceIconCircle: {
-        width: 60,
-        height: 60,
-        borderRadius: 30,
-        backgroundColor: '#1e293b', // Slate 800
-        borderColor: '#22d3ee', // Cyan 400
+    deviceIconBg: {
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        backgroundColor: '#1e293b',
         borderWidth: 2,
+        borderColor: '#22d3ee', // Accent
         justifyContent: 'center',
         alignItems: 'center',
-        marginBottom: 8,
-    },
-    deviceIcon: {
-        fontSize: 28,
-    },
-    deviceName: {
-        color: '#e2e8f0',
-        fontSize: 12,
-        fontWeight: '600',
-        backgroundColor: 'rgba(15, 23, 42, 0.8)',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 8,
-    },
-    footer: {
-        padding: 30,
-        paddingBottom: 50,
-    },
-    actionButton: {
-        backgroundColor: '#22d3ee', // Cyan 400
-        paddingVertical: 18,
-        borderRadius: 16,
-        alignItems: 'center',
+        marginBottom: 6,
         shadowColor: '#22d3ee',
-        shadowOffset: { width: 0, height: 4 },
         shadowOpacity: 0.3,
         shadowRadius: 10,
-        elevation: 5,
     },
-    actionButtonText: {
-        color: '#0f172a',
+    deviceLabel: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: '600',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 4,
+    },
+    fileAreaContainer: {
+        padding: 20,
+        paddingBottom: 40,
+    },
+    fileDropZone: {
+        height: 220,
+        borderWidth: 2,
+        borderColor: 'rgba(255,255,255,0.1)',
+        borderStyle: 'dashed',
+        borderRadius: 24,
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: 'rgba(255,255,255,0.02)',
+    },
+    uploadIconCircle: {
+        marginBottom: 16,
+    },
+    dropMainText: {
         fontSize: 18,
-        fontWeight: 'bold',
+        fontWeight: '600',
+        color: '#fff',
+        marginBottom: 4,
     },
+    dropSubText: {
+        fontSize: 14,
+        color: 'rgba(255,255,255,0.5)',
+        marginBottom: 24,
+    },
+    selectButton: {
+        backgroundColor: '#22d3ee',
+        paddingVertical: 12,
+        paddingHorizontal: 32,
+        borderRadius: 30,
+        shadowColor: '#22d3ee',
+        shadowOpacity: 0.25,
+        shadowRadius: 10,
+    },
+    selectButtonText: {
+        color: '#0f172a',
+        fontWeight: '700',
+        fontSize: 15,
+    },
+    fileSelectedState: {
+        alignItems: 'center',
+    },
+    fileSelectedText: {
+        color: '#fff',
+        fontSize: 16,
+        fontWeight: '600',
+        marginTop: 12,
+    },
+    fileSubText: {
+        color: '#22c55e',
+        marginTop: 4,
+    }
 });
 
 // Register app
