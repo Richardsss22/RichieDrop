@@ -1,7 +1,7 @@
 /**
- * RichieDrop Android - NUCLEAR MAXIMUM + FEATURES
+ * RichieDrop Android - NUCLEAR MAXIMUM + FEATURES (SAFE MODE)
  * 
- * ALL CODE INLINE - NO LAZY LOADING - NO DYNAMICS
+ * ALL CODE INLINE - NO LAZY LOADING - NO DYNAMICS - NO NATIVE LIBS
  */
 
 import { AppRegistry, LogBox } from 'react-native';
@@ -16,91 +16,49 @@ import {
     Dimensions,
     Animated,
     Easing,
-    DeviceEventEmitter,
-    Platform,
-    PermissionsAndroid
+    Platform
 } from 'react-native';
-import Zeroconf from 'react-native-zeroconf';
-import { NativeModules } from 'react-native';
 
-LogBox.ignoreLogs(['new NativeEventEmitter']); // Ignore annoying warnings
+// LogBox.ignoreLogs(['new NativeEventEmitter']); 
 
-// --- SAFE DISCOVERY SERVICE (INLINE) ---
+// --- MOCK DISCOVERY SERVICE (SAFE MODE) ---
+// Native Zeroconf causes crashes on startup, using mock for UI validation
 class SafeDiscoveryService {
-    zeroconf = null;
     deviceName = '';
     isScanning = false;
     devices = new Map();
     listeners = [];
+    mockInterval = null;
 
     constructor() {
-        try {
-            this.zeroconf = new Zeroconf();
-            console.log('[Discovery] Zeroconf instance created');
-        } catch (e) {
-            console.error('[Discovery] Failed to create Zeroconf:', e);
-        }
+        console.log('[Discovery] Safe/Mock instance created');
     }
 
     async start(name) {
-        if (!this.zeroconf) return;
         this.deviceName = name;
         this.devices.clear();
         this.notify();
+        this.isScanning = true;
+        console.log('[Discovery] Started scanning (MOCK)');
 
-        try {
-            // Android permissions check
-            if (Platform.OS === 'android') {
-                await PermissionsAndroid.requestMultiple([
-                    PermissionsAndroid.PERMISSIONS.ACCESS_WIFI_STATE,
-                    PermissionsAndroid.PERMISSIONS.CHANGE_WIFI_MULTICAST_STATE,
-                ]);
-            }
-
-            this.zeroconf.registerAddressResolver();
-
-            // Listeners
-            this.zeroconf.on('start', () => console.log('[Discovery] Started scanning'));
-            this.zeroconf.on('stop', () => console.log('[Discovery] Stopped scanning'));
-
-            this.zeroconf.on('resolved', (service) => {
-                if (service.name !== this.deviceName && service.host) {
-                    console.log('[Discovery] Found:', service.name);
-                    this.devices.set(service.name, {
-                        id: service.name,
-                        name: service.name,
-                        ip: service.addresses ? service.addresses[0] : service.host,
-                        type: 'computer' // assume computer for now
-                    });
-                    this.notify();
-                }
-            });
-
-            this.zeroconf.on('remove', (name) => {
-                console.log('[Discovery] Removed:', name);
-                this.devices.delete(name);
-                this.notify();
-            });
-
-            this.zeroconf.on('error', (err) => console.log('[Discovery] Error:', err));
-
-            // Publish & Scan
-            this.zeroconf.publishService('tcp', 'richiedrop', 'local.', name, 8080);
-            this.zeroconf.scan('richiedrop', 'tcp', 'local.');
-            this.isScanning = true;
-
-        } catch (e) {
-            console.error('[Discovery] Start failed:', e);
-        }
+        // Simulate finding a device after 2 seconds
+        this.mockInterval = setTimeout(() => {
+            if (!this.isScanning) return;
+            const mockDevice = {
+                id: 'mock-macbook',
+                name: "Ricardo's MacBook Pro (Mock)",
+                ip: '192.168.1.50',
+                type: 'computer'
+            };
+            console.log('[Discovery] Found mock device:', mockDevice.name);
+            this.devices.set(mockDevice.name, mockDevice);
+            this.notify();
+        }, 2500);
     }
 
     stop() {
-        if (!this.zeroconf) return;
-        try {
-            this.zeroconf.stop();
-            this.zeroconf.removeDeviceListeners();
-            this.isScanning = false;
-        } catch (e) { }
+        this.isScanning = false;
+        if (this.mockInterval) clearTimeout(this.mockInterval);
     }
 
     subscribe(callback) {
@@ -186,8 +144,7 @@ function App() {
 
     const handleSelectFile = () => {
         // Placeholder for now
-        Alert.alert('Selecionar Ficheiro', 'A abrir seletor de ficheiros...');
-        // In real app, import DocumentPicker logic here
+        Alert.alert('Selecionar Ficheiro', 'A abrir seletor de ficheiros (Simulado)...');
     };
 
     const handleSend = (targetDevice) => {
