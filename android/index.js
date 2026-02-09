@@ -1,11 +1,11 @@
 /**
- * RichieDrop Android - UI MATCH UPDATE
+ * RichieDrop Android - REAL UDP DISCOVERY
  * 
- * Matching Desktop UI (Dark Gradient, Dashed File Area)
- * Safe Mode (Mock Discovery) to ensure stability
+ * Uses react-native-udp and polyfills
  */
 
-import { AppRegistry, LogBox } from 'react-native';
+import './shim'; // Must be first import
+import { AppRegistry, LogBox, Platform, NativeModules, PermissionsAndroid } from 'react-native';
 import React, { useState, useEffect, useRef } from 'react';
 import {
     View,
@@ -17,46 +17,109 @@ import {
     Dimensions,
     Animated,
     Easing,
-    Platform,
-    Image
+    Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Settings, History, FileText, Smartphone, Monitor, CheckCircle, Share2, UploadCloud } from 'lucide-react-native';
+import dgram from 'react-native-udp';
 
 // Ignore specific logs
 LogBox.ignoreLogs(['new NativeEventEmitter']);
 
-// --- MOCK DISCOVERY SERVICE (SAFE MODE) ---
-class SafeDiscoveryService {
+// --- REAL UDP DISCOVERY SERVICE ---
+class UdpDiscoveryService {
+    socket = null;
     deviceName = '';
     isScanning = false;
     devices = new Map();
     listeners = [];
-    mockInterval = null;
+
+    // Config
+    PORT = 5353; // mDNS port
+    MCAST_ADDR = '224.0.0.251'; // mDNS multicast group
+    BROADCAST_PORT = 41234; // Custom protocol port for Android-Android
 
     async start(name) {
         this.deviceName = name;
         this.devices.clear();
         this.notify();
         this.isScanning = true;
+        console.log('[Discovery] Starting UDP Discovery...');
 
-        // Mock finding a device
-        this.mockInterval = setTimeout(() => {
-            if (!this.isScanning) return;
-            const mockDevice = {
-                id: 'mock-mac-air',
-                name: "MAC AIR",
-                ip: '192.168.1.100',
-                type: 'computer'
-            };
-            this.devices.set(mockDevice.name, mockDevice);
-            this.notify();
-        }, 2000);
+        // Request Permissions on Android
+        if (Platform.OS === 'android') {
+            await PermissionsAndroid.requestMultiple([
+                PermissionsAndroid.PERMISSIONS.ACCESS_WIFI_STATE,
+                PermissionsAndroid.PERMISSIONS.CHANGE_WIFI_MULTICAST_STATE,
+                PermissionsAndroid.PERMISSIONS.INTERNET
+            ]);
+        }
+
+        try {
+            this.socket = dgram.createSocket({ type: 'udp4' });
+
+            this.socket.bind(this.BROADCAST_PORT, (err) => {
+                if (err) {
+                    console.error('[Discovery] Bind failed:', err);
+                    return;
+                }
+                console.log('[Discovery] Socket bound to port', this.BROADCAST_PORT);
+                this.socket.setBroadcast(true);
+            });
+
+            this.socket.on('message', (msg, rinfo) => {
+                try {
+                    const message = msg.toString();
+                    // Basic protocol: "RICHIEDROP:deviceName"
+                    if (message.startsWith('RICHIEDROP:')) {
+                        const peerName = message.split(':')[1];
+                        if (peerName === this.deviceName) return; // Ignore self
+
+                        const peerId = `${peerName}-${rinfo.address}`;
+                        if (!this.devices.has(peerId)) {
+                            console.log(`[Discovery] Found peer: ${peerName} at ${rinfo.address}`);
+                            const device = {
+                                id: peerId,
+                                name: peerName,
+                                ip: rinfo.address,
+                                type: 'phone', // Assume phone for now via this custom proto
+                                port: 8080 // Default HTTP port
+                            };
+                            this.devices.set(peerId, device);
+                            this.notify();
+                        }
+                    }
+                } catch (e) {
+                    console.log('Parse error', e);
+                }
+            });
+
+            this.socket.on('error', (err) => {
+                // console.log('Socket error', err); // Ignore network unreachable
+            });
+
+            // Start Broadcasting presence
+            this.broadcastLoop = setInterval(() => {
+                if (!this.isScanning) return;
+                const message = `RICHIEDROP:${this.deviceName}`;
+                // Send broadcast
+                this.socket.send(message, 0, message.length, this.BROADCAST_PORT, '255.255.255.255', (err) => {
+                    if (err) console.log('Broadcast error', err);
+                });
+            }, 3000); // Every 3 seconds
+
+        } catch (e) {
+            console.error('[Discovery] Setup failed:', e);
+        }
     }
 
     stop() {
         this.isScanning = false;
-        if (this.mockInterval) clearTimeout(this.mockInterval);
+        if (this.broadcastLoop) clearInterval(this.broadcastLoop);
+        if (this.socket) {
+            this.socket.close();
+            this.socket = null;
+        }
     }
 
     subscribe(callback) {
@@ -72,7 +135,7 @@ class SafeDiscoveryService {
     }
 }
 
-const discovery = new SafeDiscoveryService();
+const discovery = new UdpDiscoveryService();
 
 // --- COMPONENTS ---
 
@@ -135,13 +198,12 @@ function App() {
     }, []);
 
     const handleSelectFile = () => {
-        Alert.alert('Selecionar', 'Abrir seletor de ficheiros...');
-        // Mock selection
-        setTimeout(() => setSelectedFile("foto_ferias.jpg"), 500);
+        Alert.alert('Selecionar', 'Abrir seletor de ficheiros (Em breve)...');
+        // setTimeout(() => setSelectedFile("foto_ferias.jpg"), 500);
     };
 
     const handleSend = (target) => {
-        Alert.alert('Enviar', `Enviar ${selectedFile || 'ficheiro'} para ${target.name}?`);
+        Alert.alert('Enviar', `Funcionalidade de envio para ${target.name} em desenvolvimento...`);
     };
 
     return (
