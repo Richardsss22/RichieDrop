@@ -39,31 +39,19 @@ jobs:
         working-directory: ./android
         run: npx expo prebuild --platform android --clean
 
-      - name: 🔧 Patch Kotlin Version
-        working-directory: ./android
+      - name: 🔧 Patch Kotlin Version (Script)
         run: |
-          # Append local gradle.properties to generated android folder (DO NOT OVERWRITE)
-          if [ -f "gradle.properties" ]; then
-            cat gradle.properties >> android/gradle.properties
+          # Make script executable just in case
+          chmod +x scripts/fix-kotlin.js
+          
+          # Run patching script
+          node scripts/fix-kotlin.js
+          
+          # Also append gradle.properties just to be safe
+          if [ -f "android/gradle.properties" ]; then
+             echo "" >> android/android/gradle.properties
+             echo "kotlinVersion=1.9.25" >> android/android/gradle.properties
           fi
-          
-          # Append Kotlin version to existing gradle.properties if it exists
-          echo "" >> android/gradle.properties
-          echo "# Force Kotlin 1.9.25 for Compose compatibility" >> android/gradle.properties
-          echo "kotlinVersion=1.9.25" >> android/gradle.properties
-          
-          # Patch all build.gradle files in android folder
-          find android -name "build.gradle" -exec sed -i 's/1\.9\.24/1.9.25/g' {} \; 2>/dev/null || true
-          find android -name "build.gradle.kts" -exec sed -i 's/1\.9\.24/1.9.25/g' {} \; 2>/dev/null || true
-          
-          # Patch node_modules expo-modules-core
-          find node_modules -path "*/expo-modules-core/*" -name "build.gradle" -exec sed -i 's/1\.9\.24/1.9.25/g' {} \; 2>/dev/null || true
-          find node_modules -path "*/expo-modules-core/*" -name "*.gradle" -exec sed -i 's/1\.9\.24/1.9.25/g' {} \; 2>/dev/null || true
-          
-          echo "Kotlin version patched to 1.9.25 everywhere"
-          
-          # Debug: show what version is in build.gradle
-          grep -r "kotlinVersion" android/build.gradle || echo "kotlinVersion not found in main build.gradle"
 
       - name: 🔨 Build APK
         working-directory: ./android/android
