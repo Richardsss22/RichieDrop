@@ -1,101 +1,176 @@
 /**
- * RichieDrop Android - Entry Point (No Router)
+ * RichieDrop Android - NUCLEAR MAXIMUM
  * 
- * This version bypasses Expo Router entirely due to compatibility issues.
- * Renders the main content directly.
+ * ALL CODE INLINE - NO LAZY LOADING - NO DYNAMIC IMPORTS
+ * This mirrors Build #31 which WORKED
  */
 
 import { AppRegistry } from 'react-native';
-import { name as appName } from './app.json';
-import React, { Suspense } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet } from 'react-native';
+import React, { useState } from 'react';
+import {
+    View,
+    Text,
+    StyleSheet,
+    StatusBar,
+    Pressable,
+    Alert,
+} from 'react-native';
 
-// Lazy load the main content
-const MainContent = React.lazy(() => import('./app/MainContent'));
+// Main App Component - EVERYTHING INLINE
+function App() {
+    const [deviceName] = useState(`Android-${Math.floor(Math.random() * 1000)}`);
+    const [selectedFile, setSelectedFile] = useState(null);
 
-// Loading fallback
-function LoadingScreen() {
+    const handleSelectFile = () => {
+        Alert.alert(
+            'Selecionar Ficheiro',
+            'Esta funcionalidade requer módulos nativos que estão desativados temporariamente.',
+            [{ text: 'OK' }]
+        );
+    };
+
     return (
-        <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#06b6d4" />
-            <Text style={styles.loadingText}>A carregar RichieDrop...</Text>
+        <View style={styles.container}>
+            <StatusBar barStyle="light-content" backgroundColor="#0f172a" />
+
+            {/* Header */}
+            <View style={styles.header}>
+                <Text style={styles.headerTitle}>📡 RichieDrop</Text>
+                <Text style={styles.headerSubtitle}>Visível como "{deviceName}"</Text>
+            </View>
+
+            {/* Radar placeholder */}
+            <View style={styles.radarSection}>
+                <View style={styles.radarCircle}>
+                    <Text style={styles.radarIcon}>📱</Text>
+                </View>
+                <Text style={styles.radarText}>A procurar dispositivos...</Text>
+                <Text style={styles.radarHint}>
+                    Abre o RichieDrop no teu computador
+                </Text>
+            </View>
+
+            {/* File selection */}
+            <View style={styles.fileSection}>
+                <Pressable style={styles.selectButton} onPress={handleSelectFile}>
+                    <Text style={styles.selectButtonText}>📁 Selecionar Ficheiro</Text>
+                </Pressable>
+
+                {selectedFile && (
+                    <View style={styles.fileItem}>
+                        <Text style={styles.fileName}>{selectedFile}</Text>
+                    </View>
+                )}
+            </View>
+
+            {/* Status */}
+            <View style={styles.statusBar}>
+                <View style={styles.statusDot} />
+                <Text style={styles.statusText}>App funcionando! Build #36</Text>
+            </View>
         </View>
     );
 }
 
-// Simple error boundary for crashes
-class ErrorBoundary extends React.Component {
-    constructor(props) {
-        super(props);
-        this.state = { hasError: false, error: null };
-    }
-
-    static getDerivedStateFromError(error) {
-        return { hasError: true, error };
-    }
-
-    componentDidCatch(error, errorInfo) {
-        console.error('App crashed:', error, errorInfo);
-    }
-
-    render() {
-        if (this.state.hasError) {
-            return (
-                <View style={styles.errorContainer}>
-                    <Text style={styles.errorTitle}>⚠️ Erro</Text>
-                    <Text style={styles.errorMessage}>
-                        {this.state.error?.message || 'Ocorreu um erro'}
-                    </Text>
-                </View>
-            );
-        }
-        return this.props.children;
-    }
-}
-
-// Main App Component
-function App() {
-    return (
-        <ErrorBoundary>
-            <Suspense fallback={<LoadingScreen />}>
-                <MainContent />
-            </Suspense>
-        </ErrorBoundary>
-    );
-}
-
 const styles = StyleSheet.create({
-    loadingContainer: {
+    container: {
         flex: 1,
         backgroundColor: '#0f172a',
-        justifyContent: 'center',
-        alignItems: 'center',
+        padding: 20,
+        paddingTop: 60,
     },
-    loadingText: {
-        marginTop: 16,
-        fontSize: 16,
-        color: '#94a3b8',
+    header: {
+        backgroundColor: 'rgba(255, 255, 255, 0.08)',
+        borderRadius: 16,
+        padding: 20,
+        marginBottom: 30,
+        borderWidth: 1,
+        borderColor: 'rgba(255, 255, 255, 0.1)',
     },
-    errorContainer: {
-        flex: 1,
-        backgroundColor: '#0f172a',
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 24,
-    },
-    errorTitle: {
-        fontSize: 24,
+    headerTitle: {
+        fontSize: 28,
         fontWeight: '700',
-        color: '#f87171',
-        marginBottom: 12,
+        color: '#ffffff',
     },
-    errorMessage: {
-        fontSize: 16,
+    headerSubtitle: {
+        fontSize: 14,
+        color: '#94a3b8',
+        marginTop: 6,
+    },
+    radarSection: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    radarCircle: {
+        width: 160,
+        height: 160,
+        borderRadius: 80,
+        backgroundColor: '#1e293b',
+        borderWidth: 3,
+        borderColor: '#22d3ee',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    radarIcon: {
+        fontSize: 60,
+    },
+    radarText: {
+        fontSize: 18,
         color: '#e2e8f0',
+        marginTop: 24,
+        fontWeight: '500',
+    },
+    radarHint: {
+        fontSize: 14,
+        color: '#64748b',
+        marginTop: 8,
         textAlign: 'center',
+    },
+    fileSection: {
+        paddingVertical: 30,
+    },
+    selectButton: {
+        backgroundColor: '#3b82f6',
+        borderRadius: 16,
+        padding: 20,
+        alignItems: 'center',
+    },
+    selectButtonText: {
+        fontSize: 18,
+        fontWeight: '600',
+        color: '#ffffff',
+    },
+    fileItem: {
+        backgroundColor: 'rgba(255, 255, 255, 0.05)',
+        borderRadius: 12,
+        padding: 16,
+        marginTop: 16,
+    },
+    fileName: {
+        fontSize: 14,
+        color: '#e2e8f0',
+    },
+    statusBar: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 16,
+    },
+    statusDot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+        backgroundColor: '#22c55e',
+        marginRight: 10,
+    },
+    statusText: {
+        fontSize: 14,
+        color: '#22c55e',
+        fontWeight: '500',
     },
 });
 
-// Register the app
+// Register app - try both possible names
 AppRegistry.registerComponent('main', () => App);
 AppRegistry.registerComponent('RichieDrop', () => App);
