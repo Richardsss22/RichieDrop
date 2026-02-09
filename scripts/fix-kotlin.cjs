@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 
 const KOTLIN_VERSION = '1.9.25';
-const OLD_VERSIONS = ['1.9.24', '1.9.23', '1.8.10', '1.8.0'];
+// Only targeting 1.9.24 because that is the version causing conflict with Compose Compiler 1.5.15
+// Previous attempts included 1.8.x which broke androidx.dependencies
+const OLD_VERSIONS = ['1.9.24'];
 
 function searchAndReplace(dir) {
     if (!fs.existsSync(dir)) return;
@@ -14,7 +16,7 @@ function searchAndReplace(dir) {
         const stat = fs.statSync(filePath);
 
         if (stat.isDirectory()) {
-            if (file !== 'build' && file !== '.git') { // Skip build folders
+            if (file !== 'build' && file !== '.git' && file !== 'node_modules') {
                 searchAndReplace(filePath);
             }
         } else if (file.endsWith('.gradle') || file.endsWith('.gradle.kts')) {
@@ -31,11 +33,16 @@ function searchAndReplace(dir) {
             }
 
             // Force kotlinVersion in buildscript ext if present
+            // This handles cases where it might be defined but not with the exact string 1.9.24
             if (filePath.endsWith('android/build.gradle')) {
-                if (content.match(/kotlinVersion\s*=\s*['"][\d.]+['"]/)) {
-                    console.log(`Forcing kotlinVersion in ${filePath}`);
-                    content = content.replace(/kotlinVersion\s*=\s*['"][\d.]+['"]/, `kotlinVersion = "${KOTLIN_VERSION}"`);
-                    changed = true;
+                const kotlinVersionRegex = /kotlinVersion\s*=\s*['"][\d.]+['"]/;
+                if (content.match(kotlinVersionRegex)) {
+                    const transform = content.replace(kotlinVersionRegex, `kotlinVersion = "${KOTLIN_VERSION}"`);
+                    if (transform !== content) {
+                        console.log(`Forcing kotlinVersion variable in ${filePath}`);
+                        content = transform;
+                        changed = true;
+                    }
                 }
             }
 
@@ -46,7 +53,7 @@ function searchAndReplace(dir) {
     }
 }
 
-console.log('Starting Kotlin version patcher...');
+console.log('Starting Kotlin version patcher (Targeting 1.9.24 only)...');
 searchAndReplace('./android');
 searchAndReplace('./node_modules/expo-modules-core');
 console.log('Done patching Kotlin versions.');
