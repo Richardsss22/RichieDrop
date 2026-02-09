@@ -1,0 +1,75 @@
+name: Android Only Build
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧾 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🏗️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📦 Install dependencies
+        working-directory: ./android
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+
+      - name: 📱 Prebuild
+        working-directory: ./android
+        run: npx expo prebuild --platform android --clean
+
+      - name: 🔧 Patch Gradle Properties
+        run: |
+          if [ -f "android/gradle.properties" ]; then
+             echo "" >> android/android/gradle.properties
+             echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m" >> android/android/gradle.properties
+             echo "android.useAndroidX=true" >> android/android/gradle.properties
+          fi
+
+      - name: 🔨 Build APK
+        working-directory: ./android/android
+        env:
+          NODE_ENV: production
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: 📦 Prepare APK
+        id: prepare_apk
+        working-directory: ./android
+        run: |
+          APK_PATH=$(find . -type f -name '*release*.apk' -o -name '*app-release*.apk' | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+             APK_PATH=$(find . -type f -name '*.apk' | head -n 1)
+          fi
+          
+          if [ -z "$APK_PATH" ]; then
+             echo "::error::No APK found."
+             exit 1
+          fi
+
+          echo "Found APK at: $APK_PATH"
+          mv "$APK_PATH" ./RichieDrop-Android.apk
+          echo "apk_path=RichieDrop-Android.apk" >> $GITHUB_OUTPUT
+
+      - name: 📤 Upload Android Assets
+        uses: softprops/action-gh-release@v2
+        if: steps.prepare_apk.outputs.apk_path != ''
+        with:
+          files: android/RichieDrop-Android.apk
+          tag_name: main
+          draft: false
+          prerelease: false
