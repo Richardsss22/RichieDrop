@@ -42,8 +42,10 @@ jobs:
       - name: 🔧 Patch Kotlin Version
         working-directory: ./android
         run: |
-          # Copy gradle.properties to generated android folder
-          cp gradle.properties android/gradle.properties 2>/dev/null || echo "No gradle.properties to copy"
+          # Append local gradle.properties to generated android folder (DO NOT OVERWRITE)
+          if [ -f "gradle.properties" ]; then
+            cat gradle.properties >> android/gradle.properties
+          fi
           
           # Append Kotlin version to existing gradle.properties if it exists
           echo "" >> android/gradle.properties
