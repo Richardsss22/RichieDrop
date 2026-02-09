@@ -1,7 +1,7 @@
 /**
- * RichieDrop Android - COMPLETE P2P (UDP Discovery + TCP Transfer)
+ * RichieDrop Android - SAFE MODE (Manual Start)
  * 
- * Uses react-native-udp and react-native-tcp-socket
+ * Prevents startup crash by waiting for user to start services.
  */
 
 import './shim'; // Must be first import
@@ -18,9 +18,10 @@ import {
     Animated,
     Easing,
     Image,
+    ScrollView
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Settings, History, FileText, Smartphone, Monitor, CheckCircle, Share2, UploadCloud } from 'lucide-react-native';
+import { Settings, History, FileText, Smartphone, Monitor, CheckCircle, Share2, UploadCloud, Play, Square } from 'lucide-react-native';
 import dgram from 'react-native-udp';
 import TcpSocket from 'react-native-tcp-socket';
 import * as DocumentPicker from 'expo-document-picker';
@@ -36,33 +37,47 @@ class UdpDiscoveryService {
     isScanning = false;
     devices = new Map();
     listeners = [];
+    logCallback = null;
 
     // Config
     PORT = 5353; // mDNS port
     MCAST_ADDR = '224.0.0.251'; // mDNS multicast group
     BROADCAST_PORT = 41234; // Custom protocol port for Android-Android
 
+    setLogger(cb) { this.logCallback = cb; }
+    log(msg) {
+        console.log(msg);
+        if (this.logCallback) this.logCallback(msg);
+    }
+
     async start(name) {
         this.deviceName = name;
         this.devices.clear();
         this.notify();
         this.isScanning = true;
-        console.log('[Discovery] Starting UDP Discovery...');
+        this.log('[Discovery] Starting UDP...');
 
         // Request Permissions on Android
         if (Platform.OS === 'android') {
-            await PermissionsAndroid.requestMultiple([
-                PermissionsAndroid.PERMISSIONS.ACCESS_WIFI_STATE,
-                PermissionsAndroid.PERMISSIONS.CHANGE_WIFI_MULTICAST_STATE,
-                PermissionsAndroid.PERMISSIONS.INTERNET
-            ]);
+            try {
+                await PermissionsAndroid.requestMultiple([
+                    PermissionsAndroid.PERMISSIONS.ACCESS_WIFI_STATE,
+                    PermissionsAndroid.PERMISSIONS.CHANGE_WIFI_MULTICAST_STATE,
+                    PermissionsAndroid.PERMISSIONS.INTERNET
+                ]);
+            } catch (e) {
+                this.log('[Discovery] Perms error: ' + e.message);
+            }
         }
 
         try {
             this.socket = dgram.createSocket({ type: 'udp4' });
             this.socket.bind(this.BROADCAST_PORT, (err) => {
-                if (err) return console.error('[Discovery] Bind failed:', err);
-                this.socket.setBroadcast(true);
+                if (err) return this.log('[Discovery] Bind failed: ' + err);
+                this.log('[Discovery] Bound to ' + this.BROADCAST_PORT);
+                try {
+                    this.socket.setBroadcast(true);
+                } catch (e) { this.log('[Discovery] setBroadcast fail: ' + e); }
             });
 
             this.socket.on('message', (msg, rinfo) => {
@@ -74,7 +89,7 @@ class UdpDiscoveryService {
 
                         const peerId = `${peerName}-${rinfo.address}`;
                         if (!this.devices.has(peerId)) {
-                            console.log(`[Discovery] Found peer: ${peerName} at ${rinfo.address}`);
+                            this.log(`[Discovery] Found: ${peerName} (${rinfo.address})`);
                             const device = {
                                 id: peerId,
                                 name: peerName,
@@ -87,20 +102,22 @@ class UdpDiscoveryService {
                         }
                     }
                 } catch (e) {
-                    console.log('Parse error', e);
+                    this.log('Parse error: ' + e);
                 }
             });
 
             this.broadcastLoop = setInterval(() => {
                 if (!this.isScanning) return;
                 const message = `RICHIEDROP:${this.deviceName}`;
-                this.socket.send(message, 0, message.length, this.BROADCAST_PORT, '255.255.255.255', (err) => {
-                    if (err) console.log('Broadcast error', err);
-                });
+                if (this.socket) {
+                    this.socket.send(message, 0, message.length, this.BROADCAST_PORT, '255.255.255.255', (err) => {
+                        if (err) this.log('Broadcast error: ' + err);
+                    });
+                }
             }, 3000);
 
         } catch (e) {
-            console.error('[Discovery] Setup failed:', e);
+            this.log('[Discovery] Setup crash: ' + e.message);
         }
     }
 
@@ -108,9 +125,10 @@ class UdpDiscoveryService {
         this.isScanning = false;
         if (this.broadcastLoop) clearInterval(this.broadcastLoop);
         if (this.socket) {
-            this.socket.close();
+            try { this.socket.close(); } catch (e) { }
             this.socket = null;
         }
+        this.log('[Discovery] Stopped');
     }
 
     subscribe(callback) {
@@ -133,59 +151,63 @@ const discovery = new UdpDiscoveryService();
 class TcpTransferService {
     server = null;
     deviceName = '';
+    logCallback = null;
+
+    setLogger(cb) { this.logCallback = cb; }
+    log(msg) {
+        console.log(msg);
+        if (this.logCallback) this.logCallback(msg);
+    }
 
     startServer(name) {
         this.deviceName = name;
-        this.server = TcpSocket.createServer((socket) => {
-            console.log('[TCP] Incoming connection from', socket.remoteAddress);
+        this.log('[TCP] Starting Server...');
+        try {
+            this.server = TcpSocket.createServer((socket) => {
+                this.log(`[TCP] Connection from ${socket.remoteAddress}`);
 
-            socket.on('data', (data) => {
-                // Simplified: Just log received data for now
-                // In production: Implement length-prefix parsing
-                console.log('[TCP] Received data chunk:', data.length, 'bytes');
-                const str = data.toString();
-                if (str.includes('"filename"')) {
-                    Alert.alert('Receber Ficheiro', `A receber dados de ${socket.remoteAddress}...`);
-                }
+                socket.on('data', (data) => {
+                    const str = data.toString();
+                    if (str.includes('"filename"')) {
+                        Alert.alert('Receber', `Dados de ${socket.remoteAddress}`);
+                    }
+                });
+
+                socket.on('error', (error) => this.log('[TCP] Socket error: ' + error));
+                socket.on('close', () => this.log('[TCP] Client disconnected'));
+            }).listen({ port: 8080, host: '0.0.0.0' }, () => {
+                this.log('[TCP] Listening on 8080');
             });
 
-            socket.on('error', (error) => console.log('[TCP] Socket error', error));
-            socket.on('close', () => console.log('[TCP] Client disconnected'));
-        }).listen({ port: 8080, host: '0.0.0.0' }, () => {
-            console.log('[TCP] Server listening on port 8080');
-        });
-
-        this.server.on('error', (error) => console.log('[TCP] Server error', error));
+            this.server.on('error', (error) => this.log('[TCP] Server error: ' + error));
+        } catch (e) {
+            this.log('[TCP] Server Crash: ' + e.message);
+        }
     }
 
     stopServer() {
         if (this.server) {
-            this.server.close();
+            try { this.server.close(); } catch (e) { }
             this.server = null;
         }
+        this.log('[TCP] Server stopped');
     }
 
     async sendFile(device, file) {
         return new Promise(async (resolve, reject) => {
             try {
-                console.log(`[TCP] Connecting to ${device.ip}:8080...`);
-                // Create client
+                this.log(`[TCP] Connecting to ${device.ip}:8080`);
                 const client = TcpSocket.createConnection({ port: 8080, host: device.ip }, () => {
-                    console.log('[TCP] Connected, sending header...');
+                    this.log('[TCP] Connected, sending...');
 
-                    // 1. Send Manifest
                     const manifest = JSON.stringify({
                         filename: file.name,
                         size: file.size,
                         sender: this.deviceName
                     });
                     client.write(manifest);
-
-                    // 2. Send File Data (Mocked read, normally use FileSystem.readAsStringAsync with encoding)
-                    // For demo, we just send the manifest as payload
                     client.write('\n\n---FILE-DATA-START---\n');
 
-                    // Wait a bit then close
                     setTimeout(() => {
                         client.destroy();
                         resolve();
@@ -193,7 +215,7 @@ class TcpTransferService {
                 });
 
                 client.on('error', (err) => {
-                    console.error('[TCP] Client error:', err);
+                    this.log('[TCP] Client error: ' + err);
                     reject(err);
                 });
 
@@ -208,11 +230,12 @@ const transfer = new TcpTransferService();
 
 // --- COMPONENTS ---
 
-const RadarRing = ({ delay, duration }) => {
+const RadarRing = ({ delay, duration, isRunning }) => {
     const scale = useRef(new Animated.Value(0)).current;
     const opacity = useRef(new Animated.Value(0.3)).current;
 
     useEffect(() => {
+        if (!isRunning) return;
         const animate = () => {
             scale.setValue(0);
             opacity.setValue(0.3);
@@ -222,7 +245,9 @@ const RadarRing = ({ delay, duration }) => {
             ]).start(() => animate());
         };
         animate();
-    }, []);
+    }, [isRunning]);
+
+    if (!isRunning) return null;
 
     return (
         <Animated.View style={[styles.radarRing, { transform: [{ scale }], opacity }]} />
@@ -233,13 +258,38 @@ const RadarRing = ({ delay, duration }) => {
 function App() {
     const [deviceName] = useState(`Android-${Math.floor(Math.random() * 1000)}`);
     const [devices, setDevices] = useState([]);
-    const [selectedFile, setSelectedFile] = useState(null); // { name, uri, size }
+    const [selectedFile, setSelectedFile] = useState(null);
+    const [running, setRunning] = useState(false);
+    const [logs, setLogs] = useState([]);
+
+    const addLog = (msg) => {
+        setLogs(prev => [msg, ...prev].slice(0, 50));
+    };
 
     useEffect(() => {
-        // Start Services
-        discovery.start(deviceName);
-        transfer.startServer(deviceName);
+        discovery.setLogger(addLog);
+        transfer.setLogger(addLog);
+    }, []);
 
+    const toggleService = () => {
+        if (running) {
+            discovery.stop();
+            transfer.stopServer();
+            setRunning(false);
+            addLog('🛑 Serviços Parados');
+        } else {
+            addLog('🚀 A iniciar serviços...');
+            try {
+                discovery.start(deviceName);
+                transfer.startServer(deviceName);
+                setRunning(true);
+            } catch (e) {
+                addLog('❌ Falha ao iniciar: ' + e.message);
+            }
+        }
+    };
+
+    useEffect(() => {
         const unsub = discovery.subscribe(setDevices);
         return () => {
             unsub();
@@ -254,7 +304,7 @@ function App() {
             if (!res.canceled && res.assets && res.assets.length > 0) {
                 const file = res.assets[0];
                 setSelectedFile(file);
-                console.log('File selected:', file);
+                addLog('Ficheiro selecionado: ' + file.name);
             }
         } catch (e) {
             Alert.alert('Erro', 'Falha ao selecionar ficheiro');
@@ -267,13 +317,13 @@ function App() {
             return;
         }
 
-        Alert.alert('A Enviar', `A tentar enviar ${selectedFile.name} para ${target.name}...`);
+        addLog(`A enviar ${selectedFile.name} para ${target.name}...`);
 
         try {
             await transfer.sendFile(target, selectedFile);
-            Alert.alert('Sucesso', 'Dados enviados!');
+            addLog('Envio concluído (simulado)');
         } catch (e) {
-            Alert.alert('Erro', `Falha no envio: ${e.message}`);
+            addLog(`Erro envio: ${e.message}`);
         }
     };
 
@@ -293,19 +343,25 @@ function App() {
                     <View>
                         <Text style={styles.appName}>RichieDrop</Text>
                         <View style={styles.statusRow}>
-                            <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
-                            <Text style={styles.statusText}>Visível como "{deviceName}"</Text>
+                            <View style={[styles.statusDot, { backgroundColor: running ? '#22c55e' : '#ef4444' }]} />
+                            <Text style={styles.statusText}>{running ? `Visível: ${deviceName}` : 'Offline'}</Text>
                         </View>
                     </View>
                 </View>
                 <View style={styles.headerRight}>
-                    <Pressable style={styles.iconButton}>
-                        <History size={20} color="#94a3b8" />
-                    </Pressable>
-                    <Pressable style={styles.iconButton}>
-                        <Settings size={20} color="#94a3b8" />
+                    <Pressable style={styles.iconButton} onPress={toggleService}>
+                        {running ? <Square size={20} color="#ef4444" fill="#ef4444" /> : <Play size={20} color="#22c55e" fill="#22c55e" />}
                     </Pressable>
                 </View>
+            </View>
+
+            {/* Logs Area (Debug) */}
+            <View style={{ height: 60, marginBottom: 10, marginHorizontal: 20, backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 8 }}>
+                <ScrollView contentContainerStyle={{ padding: 5 }}>
+                    {logs.map((l, i) => (
+                        <Text key={i} style={{ color: '#aaa', fontSize: 10 }}>{l}</Text>
+                    ))}
+                </ScrollView>
             </View>
 
             {/* Main Content */}
@@ -313,12 +369,12 @@ function App() {
 
                 {/* Radar Section */}
                 <View style={styles.radarSection}>
-                    <RadarRing delay={0} duration={3000} />
-                    <RadarRing delay={1000} duration={3000} />
+                    <RadarRing delay={0} duration={3000} isRunning={running} />
+                    <RadarRing delay={1000} duration={3000} isRunning={running} />
 
                     {/* Me Node */}
                     <View style={styles.meNode}>
-                        <Smartphone size={32} color="#fff" />
+                        <Smartphone size={32} color={running ? "#fff" : "#94a3b8"} />
                     </View>
 
                     {/* Devices */}
@@ -342,8 +398,11 @@ function App() {
                         );
                     })}
 
-                    {devices.length === 0 && (
-                        <Text style={styles.searchingText}>A procurar dispositivos próximos...</Text>
+                    {devices.length === 0 && running && (
+                        <Text style={styles.searchingText}>A procurar dispositivos...</Text>
+                    )}
+                    {!running && (
+                        <Text style={styles.searchingText}>Toca no Play para iniciar</Text>
                     )}
                 </View>
 
