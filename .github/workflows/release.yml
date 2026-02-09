@@ -42,10 +42,10 @@ jobs:
       - name: 🔧 Patch Kotlin Version (Script)
         run: |
           # Make script executable just in case
-          chmod +x scripts/fix-kotlin.js
+          chmod +x scripts/fix-kotlin.cjs
           
           # Run patching script
-          node scripts/fix-kotlin.js
+          node scripts/fix-kotlin.cjs
           
           # Also append gradle.properties just to be safe
           if [ -f "android/gradle.properties" ]; then
