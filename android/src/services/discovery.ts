@@ -17,19 +17,33 @@ type DeviceCallback = (device: Device) => void;
 type DeviceLostCallback = (deviceId: string) => void;
 
 class DiscoveryService {
-    private zeroconf: Zeroconf;
-    private myName: string = '';
-    private myPort: number = 8080;
+    private zeroconf: Zeroconf | undefined;
+    private myName: string | undefined;
+    private myPort: number | undefined;
+    private discoveredDevices: Map<string, Device> = new Map();
     private deviceFoundCallbacks: DeviceCallback[] = [];
     private deviceLostCallbacks: DeviceLostCallback[] = [];
-    private discoveredDevices: Map<string, Device> = new Map();
 
     constructor() {
-        this.zeroconf = new Zeroconf();
-        this.setupListeners();
+        // Lazy initialization happens in startDiscovery
+    }
+
+    private getZeroconf(): Zeroconf {
+        if (!this.zeroconf) {
+            try {
+                this.zeroconf = new Zeroconf();
+                this.setupListeners();
+            } catch (error) {
+                console.error('[Discovery] Failed to initialize Zeroconf native module:', error);
+                throw new Error('Zeroconf native module not available');
+            }
+        }
+        return this.zeroconf;
     }
 
     private setupListeners() {
+        if (!this.zeroconf) return;
+
         // Device found
         this.zeroconf.on('resolved', (service: any) => {
             // Skip self
@@ -73,7 +87,7 @@ class DiscoveryService {
 
         try {
             // Publish ourselves as _richiedrop._tcp service (same as desktop)
-            this.zeroconf.publishService(
+            this.getZeroconf().publishService(
                 'tcp',
                 'richiedrop',
                 deviceName,
@@ -81,7 +95,7 @@ class DiscoveryService {
             );
 
             // Start scanning for other RichieDrop devices
-            this.zeroconf.scan('richiedrop', 'tcp', 'local.');
+            this.getZeroconf().scan('richiedrop', 'tcp', 'local.');
 
             console.log(`[Discovery] Started as "${deviceName}" on port ${port}`);
             return deviceName;
@@ -95,8 +109,14 @@ class DiscoveryService {
      * Stop discovery service
      */
     stopDiscovery() {
-        this.zeroconf.unpublishService(this.myName);
-        this.zeroconf.stop();
+        if (this.zeroconf) {
+            try {
+                this.zeroconf.unpublishService(this.myName || '');
+                this.zeroconf.stop();
+            } catch (e) {
+                console.warn('[Discovery] Error stopping zeroconf:', e);
+            }
+        }
         this.discoveredDevices.clear();
         console.log('[Discovery] Stopped');
     }
