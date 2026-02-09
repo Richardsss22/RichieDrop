@@ -28,14 +28,24 @@ class DiscoveryService {
         // Lazy initialization happens in startDiscovery
     }
 
-    private getZeroconf(): Zeroconf {
+    private isZeroconfAvailable: boolean = true;
+
+    private getZeroconf(): Zeroconf | null {
+        if (!this.isZeroconfAvailable) {
+            return null;
+        }
         if (!this.zeroconf) {
             try {
+                // Check if native module is available first
+                if (!Zeroconf) {
+                    throw new Error('Zeroconf module is undefined');
+                }
                 this.zeroconf = new Zeroconf();
                 this.setupListeners();
             } catch (error) {
-                console.error('[Discovery] Failed to initialize Zeroconf native module:', error);
-                throw new Error('Zeroconf native module not available');
+                console.warn('[Discovery] Zeroconf native module not available, using mock mode:', error);
+                this.isZeroconfAvailable = false;
+                return null;
             }
         }
         return this.zeroconf;
@@ -86,8 +96,16 @@ class DiscoveryService {
         this.myPort = port;
 
         try {
+            const zc = this.getZeroconf();
+
+            // If Zeroconf is not available, just log and continue
+            if (!zc) {
+                console.warn('[Discovery] Zeroconf not available, discovery disabled');
+                return deviceName;
+            }
+
             // Publish ourselves as _richiedrop._tcp service (same as desktop)
-            this.getZeroconf().publishService(
+            zc.publishService(
                 'tcp',
                 'richiedrop',
                 deviceName,
@@ -95,13 +113,13 @@ class DiscoveryService {
             );
 
             // Start scanning for other RichieDrop devices
-            this.getZeroconf().scan('richiedrop', 'tcp', 'local.');
+            zc.scan('richiedrop', 'tcp', 'local.');
 
             console.log(`[Discovery] Started as "${deviceName}" on port ${port}`);
             return deviceName;
         } catch (error) {
-            console.error('[Discovery] Failed to start:', error);
-            throw error;
+            console.warn('[Discovery] Failed to start, continuing without discovery:', error);
+            return deviceName;
         }
     }
 

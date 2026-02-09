@@ -70,22 +70,23 @@ export default function HomeScreen() {
     // Initialize discovery
     useEffect(() => {
         const init = async () => {
-            // Load saved device name
-            let savedName = await AsyncStorage.getItem(STORAGE_KEY);
-            if (!savedName) {
-                savedName = `Android-${Math.floor(Math.random() * 1000)}`;
-                await AsyncStorage.setItem(STORAGE_KEY, savedName);
-            }
-            setMyDeviceName(savedName);
-            setDeviceName(savedName);
-
-            // Start mDNS discovery
             try {
+                // Load saved device name
+                let savedName = await AsyncStorage.getItem(STORAGE_KEY);
+                if (!savedName) {
+                    savedName = `Android-${Math.floor(Math.random() * 1000)}`;
+                    await AsyncStorage.setItem(STORAGE_KEY, savedName);
+                }
+                setMyDeviceName(savedName);
+                setDeviceName(savedName);
+
+                // Start mDNS discovery (may fail silently if native module unavailable)
                 await startDiscovery(savedName, DEFAULT_PORT);
                 setScanning(true);
             } catch (error) {
-                console.error('Failed to start discovery:', error);
-                Alert.alert('Erro', 'Não foi possível iniciar a descoberta de dispositivos');
+                console.warn('Initialization error:', error);
+                // Don't show alert - just continue without discovery
+                setScanning(false);
             }
         };
 
@@ -93,7 +94,11 @@ export default function HomeScreen() {
 
         // Cleanup
         return () => {
-            stopDiscovery();
+            try {
+                stopDiscovery();
+            } catch (e) {
+                // Ignore cleanup errors
+            }
         };
     }, []);
 

@@ -5,3 +5,4 @@ export { TransferModal } from './TransferModal';
 export { SettingsModal } from './SettingsModal';
 export { HistoryModal, type TransferHistoryItem } from './HistoryModal';
 export { Header } from './Header';
+export { ErrorBoundary } from './ErrorBoundary';
