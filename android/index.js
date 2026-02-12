@@ -57,14 +57,24 @@ class UdpDiscoveryService {
         this.isScanning = true;
         this.log('[UDP] Starting Sequence...');
 
-        // 1. Perms
+        // 1. Perms (only request runtime permissions, not manifest-only)
         if (Platform.OS === 'android') {
             try {
-                await PermissionsAndroid.requestMultiple([
-                    PermissionsAndroid.PERMISSIONS.ACCESS_WIFI_STATE,
-                    PermissionsAndroid.PERMISSIONS.CHANGE_WIFI_MULTICAST_STATE,
-                    PermissionsAndroid.PERMISSIONS.INTERNET
-                ]);
+                // INTERNET, ACCESS_WIFI_STATE, CHANGE_WIFI_MULTICAST_STATE are manifest-only
+                // They don't need runtime requests and cause crashes if requested
+                // For UDP discovery on LAN, we only need manifest permissions
+
+                // Optional: Request location if needed for WiFi scanning (Android 10+)
+                // Uncomment if you need to scan WiFi networks:
+                // const perms = [];
+                // if (PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION) {
+                //     perms.push(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+                // }
+                // if (perms.length > 0) {
+                //     await PermissionsAndroid.requestMultiple(perms);
+                // }
+
+                this.log('[UDP] Permissions OK (manifest-only, no runtime needed)');
             } catch (e) {
                 this.log('[UDP] Perms Error: ' + e.message);
             }
