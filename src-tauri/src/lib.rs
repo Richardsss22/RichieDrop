@@ -213,7 +213,11 @@ async fn notify_peer(
     sender_name: String,
     download_url: String,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("http://{}:{}/notify", target_ip, target_port);
 
     let payload = NotifyPayload {
