@@ -439,6 +439,13 @@ export default function App() {
                                                 <p className="text-sm font-medium text-white truncate">{file.name}</p>
                                                 <p className="text-xs text-slate-400">{file.size}</p>
                                             </div>
+                                            <button
+                                                onClick={() => setSelectedFiles(prev => prev.filter((_, idx) => idx !== i))}
+                                                className="w-7 h-7 rounded-full flex items-center justify-center text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all cursor-pointer pointer-events-auto"
+                                                title="Remover ficheiro"
+                                            >
+                                                <X size={14} />
+                                            </button>
                                         </div>
                                     ))}
                                     <div className="mt-4 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-xs text-left">
