@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Json, Path, State},
+    extract::{Json, Path},
     http::{header, StatusCode},
     routing::{get, post},
     Router,
@@ -9,10 +9,18 @@ use local_ip_address::local_ip;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use std::sync::{LazyLock, Mutex};
+use tauri::Emitter;
 use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
+
+// ── Global shared state (simple, no Axum/Tauri state complexity) ──
+static TRANSFERS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SERVER_PORT: LazyLock<Mutex<Option<u16>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+// ── Data types ──
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Device {
@@ -31,30 +39,23 @@ pub struct NotifyPayload {
     download_url: String,
 }
 
-struct AppState {
-    // Map filename -> absolute path
-    // Wrapped in Arc so we can share it with Axum state
-    transfers: Arc<Mutex<HashMap<String, PathBuf>>>,
-    // Store the port we are listening on
-    port: Mutex<Option<u16>>,
-}
-
 #[derive(serde::Serialize)]
 struct TransferResult {
     ip: String,
     port: u16,
 }
 
+// ── Commands ──
+
 #[tauri::command]
 async fn start_discovery(
     app_handle: tauri::AppHandle,
     device_name: String,
     port: u16,
-    state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
 
-    // 1. Advertise Ourselves
+    // 1. Advertise ourselves
     let my_ip = local_ip().map_err(|e| e.to_string())?;
     let ip_str = my_ip.to_string();
     let service_type = "_richiedrop._tcp.local.";
@@ -67,15 +68,10 @@ async fn start_discovery(
 
     mdns.register(service_info).map_err(|e| e.to_string())?;
 
-    // Update state with the port we are using
-    *state.port.lock().unwrap() = Some(port);
-
-    // 2. Start Control Server (Signaling + File Serving) on the SAME port
+    // 2. Start HTTP server (signaling + file serving) on the discovery port
     let app_handle_server = app_handle.clone();
-    let transfer_map = state.transfers.clone();
 
     tauri::async_runtime::spawn(async move {
-        // Define Axum app
         let app = Router::new()
             .route(
                 "/notify",
@@ -86,43 +82,49 @@ async fn start_discovery(
                 }),
             )
             .route(
-                "/download/:filename",
-                get(move |Path(filename): Path<String>, State(map): State<Arc<Mutex<HashMap<String, PathBuf>>>>| async move {
-                    let path = {
-                        let lock = map.lock().unwrap();
-                        lock.get(&filename).cloned()
+                "/download/{filename}",
+                get(|Path(filename): Path<String>| async move {
+                    // Look up file in the global transfers map
+                    let file_path = {
+                        let map = TRANSFERS.lock().unwrap();
+                        map.get(&filename).cloned()
                     };
-                    
-                    if let Some(p) = path {
-                        if let Ok(file) = tokio::fs::File::open(&p).await {
-                             let stream = ReaderStream::new(file);
-                             let body = Body::from_stream(stream);
-                             
-                             // Try to guess mime type or just send as octet-stream
-                             // For simplicity: octet-stream with attachment disposition
-                             let content_disposition = format!("attachment; filename=\"{}\"", filename);
-                             
-                             let headers = [
-                                 (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                                 (header::CONTENT_DISPOSITION, content_disposition),
-                             ];
-                             
-                             return Ok((headers, body));
+
+                    match file_path {
+                        Some(p) if p.exists() => {
+                            match tokio::fs::File::open(&p).await {
+                                Ok(file) => {
+                                    let stream = ReaderStream::new(file);
+                                    let body = Body::from_stream(stream);
+                                    let disp = format!("attachment; filename=\"{}\"", filename);
+                                    Ok((
+                                        [
+                                            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                                            (header::CONTENT_DISPOSITION, disp),
+                                        ],
+                                        body,
+                                    ))
+                                }
+                                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+                            }
                         }
+                        _ => Err(StatusCode::NOT_FOUND),
                     }
-                    Err(StatusCode::NOT_FOUND)
                 }),
             )
-            .with_state(transfer_map)
             .layer(CorsLayer::permissive());
 
-        // Bind strict to the discovery port
         let addr = format!("0.0.0.0:{}", port);
-        if let Ok(listener) = tokio::net::TcpListener::bind(&addr).await {
-            println!("Control server listening on {}", addr);
-            let _ = axum::serve(listener, app).await;
-        } else {
-            eprintln!("Failed to bind control server on port {}", port);
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                let actual_port = listener.local_addr().unwrap().port();
+                *SERVER_PORT.lock().unwrap() = Some(actual_port);
+                println!("Server listening on 0.0.0.0:{}", actual_port);
+                let _ = axum::serve(listener, app).await;
+            }
+            Err(e) => {
+                eprintln!("FATAL: Failed to bind on port {}: {}", port, e);
+            }
         }
     });
 
@@ -175,29 +177,27 @@ fn get_devices() -> Vec<Device> {
 #[tauri::command]
 async fn send_file(
     _app_handle: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
     filepath: String,
 ) -> Result<TransferResult, String> {
-    let path = std::path::PathBuf::from(filepath.clone());
+    let path = PathBuf::from(&filepath);
     if !path.exists() {
         return Err("File not found".to_string());
     }
-    
+
     let filename = path
         .file_name()
         .ok_or("Invalid filename")?
         .to_string_lossy()
         .to_string();
 
-    // Register file in the shared map
-    {
-        let mut transfers = state.transfers.lock().unwrap();
-        transfers.insert(filename.clone(), path);
-    }
-    
-    // Get the port we are running on
-    let port = *state.port.lock().unwrap();
-    let port = port.ok_or("Discovery service not running")?;
+    // Register in global map
+    TRANSFERS.lock().unwrap().insert(filename.clone(), path);
+
+    // Get the server port
+    let port = SERVER_PORT
+        .lock()
+        .unwrap()
+        .ok_or("Server not running yet")?;
 
     let ip = local_ip().map_err(|e| e.to_string())?.to_string();
 
@@ -235,10 +235,13 @@ async fn notify_peer(
 
 #[tauri::command]
 async fn receive_file(url: String, save_path: String) -> Result<(), String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    let mut file = tokio::fs::File::create(save_path)
+    let resp = reqwest::get(&url)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Download failed for {}: {}", url, e))?;
+
+    let mut file = tokio::fs::File::create(&save_path)
+        .await
+        .map_err(|e| format!("Cannot create {}: {}", save_path, e))?;
 
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
@@ -251,13 +254,11 @@ async fn receive_file(url: String, save_path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Entry point ──
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState {
-            transfers: Arc::new(Mutex::new(HashMap::new())),
-            port: Mutex::new(None),
-        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

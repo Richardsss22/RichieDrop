@@ -382,7 +382,7 @@ export default function App() {
                         <div className={`flex-1 rounded-3xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center p-6 text-center gap-4 relative overflow-hidden group
               ${isDragging ? 'border-cyan-400 bg-cyan-400/10' : 'border-slate-700 bg-slate-800/30 hover:border-slate-600'}
             `}>
-                            <div className="absolute inset-0 bg-gradient-to-br from-transparent to-white/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                            <div className="absolute inset-0 bg-gradient-to-br from-transparent to-white/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
 
                             {selectedFiles.length === 0 ? (
                                 <>
