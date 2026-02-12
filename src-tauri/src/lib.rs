@@ -1,24 +1,21 @@
 use axum::{
     body::Body,
     extract::{Json, Path},
-    http::{header, StatusCode},
-    routing::{get, post},
+    http::StatusCode,
+    routing::post,
     Router,
 };
+use futures_util::StreamExt;
 use local_ip_address::local_ip;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use tauri::Emitter;
-use tokio_util::io::ReaderStream;
+use tokio::io::AsyncWriteExt;
 use tower_http::cors::CorsLayer;
 
-// ── Global shared state (simple, no Axum/Tauri state complexity) ──
-static TRANSFERS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static SERVER_PORT: LazyLock<Mutex<Option<u16>>> =
-    LazyLock::new(|| Mutex::new(None));
+// ── Global state ──
+static SERVER_PORT: LazyLock<Mutex<Option<u16>>> = LazyLock::new(|| Mutex::new(None));
 
 // ── Data types ──
 
@@ -39,12 +36,6 @@ pub struct NotifyPayload {
     download_url: String,
 }
 
-#[derive(serde::Serialize)]
-struct TransferResult {
-    ip: String,
-    port: u16,
-}
-
 // ── Commands ──
 
 #[tauri::command]
@@ -55,7 +46,6 @@ async fn start_discovery(
 ) -> Result<String, String> {
     let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
 
-    // 1. Advertise ourselves
     let my_ip = local_ip().map_err(|e| e.to_string())?;
     let ip_str = my_ip.to_string();
     let service_type = "_richiedrop._tcp.local.";
@@ -68,48 +58,77 @@ async fn start_discovery(
 
     mdns.register(service_info).map_err(|e| e.to_string())?;
 
-    // 2. Start HTTP server (signaling + file serving) on the discovery port
+    // Start HTTP server
     let app_handle_server = app_handle.clone();
 
     tauri::async_runtime::spawn(async move {
+        let app_handle_notify = app_handle_server.clone();
+        let app_handle_upload = app_handle_server.clone();
+
         let app = Router::new()
             .route(
                 "/notify",
                 post(move |Json(payload): Json<NotifyPayload>| async move {
                     println!("Received transfer request: {:?}", payload);
-                    let _ = app_handle_server.emit("transfer-request", payload);
+                    let _ = app_handle_notify.emit("transfer-request", payload);
                     StatusCode::OK
                 }),
             )
             .route(
-                "/download/{filename}",
-                get(|Path(filename): Path<String>| async move {
-                    // Look up file in the global transfers map
-                    let file_path = {
-                        let map = TRANSFERS.lock().unwrap();
-                        map.get(&filename).cloned()
+                "/upload/{filename}",
+                post(move |Path(filename): Path<String>, body: Body| async move {
+                    println!("Receiving file upload: {}", filename);
+                    // Save to temp directory
+                    let temp_dir = std::env::temp_dir().join("richiedrop_incoming");
+                    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+                        eprintln!("Failed to create temp dir: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+
+                    let save_path = temp_dir.join(&filename);
+                    let file = match tokio::fs::File::create(&save_path).await {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("Failed to create temp file: {}", e);
+                            return StatusCode::INTERNAL_SERVER_ERROR;
+                        }
                     };
 
-                    match file_path {
-                        Some(p) if p.exists() => {
-                            match tokio::fs::File::open(&p).await {
-                                Ok(file) => {
-                                    let stream = ReaderStream::new(file);
-                                    let body = Body::from_stream(stream);
-                                    let disp = format!("attachment; filename=\"{}\"", filename);
-                                    Ok((
-                                        [
-                                            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                                            (header::CONTENT_DISPOSITION, disp),
-                                        ],
-                                        body,
-                                    ))
+                    let mut writer = tokio::io::BufWriter::new(file);
+                    let mut stream = body.into_data_stream();
+
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(data) => {
+                                if let Err(e) = writer.write_all(&data).await {
+                                    eprintln!("Write error: {}", e);
+                                    return StatusCode::INTERNAL_SERVER_ERROR;
                                 }
-                                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+                            }
+                            Err(e) => {
+                                eprintln!("Stream error: {}", e);
+                                return StatusCode::INTERNAL_SERVER_ERROR;
                             }
                         }
-                        _ => Err(StatusCode::NOT_FOUND),
                     }
+
+                    if let Err(e) = writer.flush().await {
+                        eprintln!("Flush error: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+
+                    println!("File saved to temp: {:?}", save_path);
+
+                    // Emit event so frontend knows the file arrived
+                    let _ = app_handle_upload.emit(
+                        "file-uploaded",
+                        serde_json::json!({
+                            "filename": filename,
+                            "temp_path": save_path.to_string_lossy().to_string()
+                        }),
+                    );
+
+                    StatusCode::OK
                 }),
             )
             .layer(CorsLayer::permissive());
@@ -128,7 +147,7 @@ async fn start_discovery(
         }
     });
 
-    // 3. Browse for others
+    // Browse for others
     let receiver = mdns.browse(service_type).map_err(|e| e.to_string())?;
     let app_handle_clone = app_handle.clone();
     let my_ip_clone = my_ip.clone();
@@ -143,7 +162,6 @@ async fn start_discovery(
                         if addr.to_string() == my_ip_clone.to_string() {
                             continue;
                         }
-
                         let device = Device {
                             id: id.clone(),
                             name: info.get_hostname().trim_end_matches('.').to_string(),
@@ -154,7 +172,6 @@ async fn start_discovery(
                                 .unwrap()
                                 .as_secs(),
                         };
-
                         let _ = app_handle_clone.emit("device-found", device);
                     }
                 }
@@ -174,11 +191,14 @@ fn get_devices() -> Vec<Device> {
     vec![]
 }
 
+/// Notify the peer AND push the file to them (sender → receiver)
 #[tauri::command]
-async fn send_file(
-    _app_handle: tauri::AppHandle,
+async fn send_file_to_peer(
+    target_ip: String,
+    target_port: u16,
     filepath: String,
-) -> Result<TransferResult, String> {
+    sender_name: String,
+) -> Result<(), String> {
     let path = PathBuf::from(&filepath);
     if !path.exists() {
         return Err("File not found".to_string());
@@ -190,67 +210,81 @@ async fn send_file(
         .to_string_lossy()
         .to_string();
 
-    // Register in global map
-    TRANSFERS.lock().unwrap().insert(filename.clone(), path);
+    let file_data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("Cannot read file: {}", e))?;
 
-    // Get the server port
-    let port = SERVER_PORT
-        .lock()
-        .unwrap()
-        .ok_or("Server not running yet")?;
-
-    let ip = local_ip().map_err(|e| e.to_string())?.to_string();
-
-    Ok(TransferResult { ip, port })
-}
-
-#[tauri::command]
-async fn notify_peer(
-    target_ip: String,
-    target_port: u16,
-    filename: String,
-    filesize: String,
-    sender_name: String,
-    download_url: String,
-) -> Result<(), String> {
+    let filesize = format!("{}", file_data.len());
     let client = reqwest::Client::new();
-    let url = format!("http://{}:{}/notify", target_ip, target_port);
 
+    // Step 1: Notify the peer (lightweight metadata)
+    let notify_url = format!("http://{}:{}/notify", target_ip, target_port);
     let payload = NotifyPayload {
-        filename,
-        filesize,
+        filename: filename.clone(),
+        filesize: filesize.clone(),
         sender_name,
-        download_url,
+        download_url: String::new(), // Not used anymore
     };
 
-    let _res = client
-        .post(url)
+    client
+        .post(&notify_url)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Notify failed: {}", e))?;
+
+    // Step 2: Push the file data to the peer
+    let upload_url = format!(
+        "http://{}:{}/upload/{}",
+        target_ip,
+        target_port,
+        urlencoding::encode(&filename)
+    );
+
+    client
+        .post(&upload_url)
+        .header("content-type", "application/octet-stream")
+        .body(file_data)
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", e))?;
 
     Ok(())
 }
 
+/// Move file from temp to user-chosen save path
 #[tauri::command]
-async fn receive_file(url: String, save_path: String) -> Result<(), String> {
-    let resp = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Download failed for {}: {}", url, e))?;
-
-    let mut file = tokio::fs::File::create(&save_path)
-        .await
-        .map_err(|e| format!("Cannot create {}: {}", save_path, e))?;
-
-    let mut stream = resp.bytes_stream();
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+async fn save_received_file(temp_path: String, save_path: String) -> Result<(), String> {
+    // Try rename first (fast, same filesystem)
+    if tokio::fs::rename(&temp_path, &save_path).await.is_ok() {
+        return Ok(());
     }
+
+    // Fallback: copy + delete (cross-filesystem)
+    tokio::fs::copy(&temp_path, &save_path)
+        .await
+        .map_err(|e| format!("Copy failed: {}", e))?;
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    Ok(())
+}
+
+/// Get the temp file path for a given filename
+#[tauri::command]
+fn get_temp_file_path(filename: String) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir().join("richiedrop_incoming");
+    let path = temp_dir.join(&filename);
+    if path.exists() {
+        Ok(path.to_string_lossy().to_string())
+    } else {
+        Err(format!("File not found in temp: {}", path.display()))
+    }
+}
+
+/// Delete temp file when user declines
+#[tauri::command]
+async fn decline_received_file(temp_path: String) -> Result<(), String> {
+    let _ = tokio::fs::remove_file(&temp_path).await;
     Ok(())
 }
 
@@ -264,9 +298,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_discovery,
             get_devices,
-            send_file,
-            receive_file,
-            notify_peer
+            send_file_to_peer,
+            save_received_file,
+            get_temp_file_path,
+            decline_received_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

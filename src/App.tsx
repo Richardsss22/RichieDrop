@@ -15,7 +15,6 @@ import {
     Save
 } from 'lucide-react';
 import { startDiscovery, onDeviceFound, onDeviceLost, Device } from "./discovery";
-import { sendFile } from "./transfer";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { invoke } from "@tauri-apps/api/core";
@@ -37,6 +36,7 @@ interface IncomingTransfer {
     filesize: string;
     sender_name: string;
     download_url: string;
+    temp_path?: string; // Set when file upload completes
 }
 
 export default function App() {
@@ -90,6 +90,17 @@ export default function App() {
                 setIncomingTransfer(event.payload);
             });
 
+            // Listen for file upload completion (sender pushed file to us)
+            const unlistenUpload = await listen<{ filename: string; temp_path: string }>('file-uploaded', (event) => {
+                console.log("File uploaded to temp:", event.payload);
+                setIncomingTransfer(prev => {
+                    if (prev && prev.filename === event.payload.filename) {
+                        return { ...prev, temp_path: event.payload.temp_path };
+                    }
+                    return prev;
+                });
+            });
+
             // Drag & Drop do Tauri
             const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
                 if (event.payload.type === 'enter') {
@@ -115,6 +126,7 @@ export default function App() {
                 unlistenLost();
                 unlistenDrop();
                 unlistenTransfer();
+                unlistenUpload();
             };
         };
 
@@ -164,53 +176,42 @@ export default function App() {
         const fileToSend = selectedFiles[0];
 
         try {
-            console.log(`Starting send for ${fileToSend.path}`);
-
-            // 1. Start serving file (Backend)
-            const result = await sendFile(fileToSend.path);
-            console.log(`File serving at ${result.ip}:${result.port}`);
-
-            const downloadUrl = `http://${result.ip}:${result.port}/download/${encodeURIComponent(fileToSend.name)}`;
-
-            // 2. Notify Peer (Signaling)
-            console.log(`Notifying peer at ${device.ip}:${device.port}`);
-            await invoke("notify_peer", {
-                targetIp: device.ip,
-                targetPort: device.port,
-                filename: fileToSend.name,
-                filesize: "Unknown",
-                senderName: myDeviceName,
-                downloadUrl: downloadUrl
-            });
+            console.log(`Sending ${fileToSend.path} to ${device.ip}:${device.port}`);
 
             // Simulate progress
             let progress = 0;
             const interval = setInterval(() => {
-                progress += 5;
-                if (progress > 95) clearInterval(interval);
+                progress += 3;
+                if (progress > 90) clearInterval(interval);
                 setFoundDevices(prev => prev.map(d => d.id === deviceId ? { ...d, progress } : d));
-            }, 100);
+            }, 200);
+
+            // Single command: notifies peer AND pushes file data (sender → receiver)
+            await invoke("send_file_to_peer", {
+                targetIp: device.ip,
+                targetPort: device.port,
+                filepath: fileToSend.path,
+                senderName: myDeviceName
+            });
+
+            clearInterval(interval);
+            setFoundDevices(prev => prev.map(d =>
+                d.id === deviceId ? { ...d, status: 'success', progress: 100 } : d
+            ));
+
+            // Add History
+            setTransferHistory(prev => [{
+                name: fileToSend.name,
+                device: device.name,
+                time: new Date().toLocaleTimeString('pt-PT'),
+                success: true
+            }, ...prev].slice(0, 20));
 
             setTimeout(() => {
-                clearInterval(interval);
                 setFoundDevices(prev => prev.map(d =>
-                    d.id === deviceId ? { ...d, status: 'success', progress: 100 } : d
+                    d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
                 ));
-
-                // Add History
-                setTransferHistory(prev => [{
-                    name: fileToSend.name,
-                    device: device.name,
-                    time: new Date().toLocaleTimeString('pt-PT'),
-                    success: true
-                }, ...prev].slice(0, 20));
-
-                setTimeout(() => {
-                    setFoundDevices(prev => prev.map(d =>
-                        d.id === deviceId ? { ...d, status: 'idle', progress: 0 } : d
-                    ));
-                }, 3000);
-            }, 5000);
+            }, 3000);
 
         } catch (e) {
             console.error(e);
@@ -237,12 +238,37 @@ export default function App() {
                 defaultPath: incomingTransfer.filename
             });
 
-            if (!savePath) return; // User cancelled
+            if (!savePath) {
+                // User cancelled - clean up temp file
+                if (incomingTransfer.temp_path) {
+                    await invoke("decline_received_file", { tempPath: incomingTransfer.temp_path });
+                }
+                setIncomingTransfer(null);
+                return;
+            }
 
             setIsReceiving(true);
 
-            // Start Download
-            await invoke("receive_file", { url: incomingTransfer.download_url, savePath });
+            // Wait for the sender to finish pushing the file
+            let tempPath: string | null = null;
+            for (let i = 0; i < 60; i++) {
+                try {
+                    tempPath = await invoke<string>("get_temp_file_path", {
+                        filename: incomingTransfer.filename
+                    });
+                    break; // File found!
+                } catch {
+                    // File not yet uploaded, wait and retry
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
+
+            if (!tempPath) {
+                throw new Error("File upload did not complete in time");
+            }
+
+            // Move from temp to user-chosen save path
+            await invoke("save_received_file", { tempPath, savePath });
 
             // Success
             setIsReceiving(false);
