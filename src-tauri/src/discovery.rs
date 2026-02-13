@@ -137,7 +137,7 @@ impl DiscoveryService {
 
                             {
                                 let mut peers_lock = peers_recv.lock().unwrap();
-                                peers_lock.insert(msg.id.clone(), peer);
+                                peers_lock.insert(msg.id.clone(), peer.clone());
                             }
 
                             // If DISCOVER, send ANNOUNCE back
@@ -157,8 +157,9 @@ impl DiscoveryService {
                             }
 
                             // Emit update
-                            let peer_list: Vec<Peer> = peers_recv.lock().unwrap().values().cloned().collect();
-                            let _ = app_handle_receive.emit("peer:update", peer_list);
+                            // The payload must match `Device` structure expected by frontend
+                            // `App.tsx` expects `Device` which maps to `UIDevice`
+                            let _ = app_handle_receive.emit("device-found", peer);
                         }
                     }
                 }
@@ -178,11 +179,19 @@ impl DiscoveryService {
                     .as_secs();
 
                 let mut peers_lock = peers_cleanup.lock().unwrap();
-                peers_lock.retain(|_, peer| now - peer.last_seen < PEER_TIMEOUT_SECS);
+                
+                // Identify dead peers
+                let dead_peers: Vec<String> = peers_lock
+                    .iter()
+                    .filter(|(_, peer)| now - peer.last_seen >= PEER_TIMEOUT_SECS)
+                    .map(|(id, _)| id.clone())
+                    .collect();
 
-                // Emit update
-                let peer_list: Vec<Peer> = peers_lock.values().cloned().collect();
-                let _ = app_handle_broadcast.emit("peer:update", peer_list);
+                // Remove and notify
+                for id in dead_peers {
+                    peers_lock.remove(&id);
+                    let _ = app_handle_broadcast.emit("device-lost", id);
+                }
             }
         });
 
