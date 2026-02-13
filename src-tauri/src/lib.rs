@@ -49,10 +49,19 @@ pub struct NotifyPayload {
 async fn start_discovery(
     app_handle: tauri::AppHandle,
     device_name: String,
-    port: u16,
+    port: u16, // mantém assinatura para não quebrar UI
 ) -> Result<String, String> {
-    // Create and start UDP discovery service
-    let discovery = DiscoveryService::new(device_name.clone(), port);
+    // Garante clean restart
+    if let Some(old) = DISCOVERY_SERVICE.lock().unwrap().take() {
+        old.stop();
+    }
+
+    // Usa esta porta como porta HTTP anunciada no discovery
+    let http_port = port;
+
+    // Discovery service deve continuar a usar UDP interno 41234;
+    // aqui só lhe passas o nome + porta TCP anunciada.
+    let discovery = DiscoveryService::new(device_name.clone(), http_port);
     discovery.start(app_handle.clone())?;
     
     // Store in global state
@@ -97,7 +106,7 @@ async fn start_discovery(
                         return StatusCode::LENGTH_REQUIRED;
                     };
 
-                    println!("Receiving file upload: {} ({} bytes)", filename, expected_size);
+                    println!("[transfer][receiver] expected_size={}", expected_size);
                     
                     let temp_dir = std::env::temp_dir().join("richiedrop_incoming");
                     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
@@ -147,10 +156,16 @@ async fn start_discovery(
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
 
-                    println!("Transfer finished: received {} of {} bytes", received_bytes, expected_size);
+                    println!(
+                        "[transfer][receiver] received_bytes={} expected_size={}",
+                        received_bytes, expected_size
+                    );
 
                     if received_bytes != expected_size {
-                        eprintln!("[transfer][receiver] Mismatch or EOF prematuro: expected_size={} received_bytes={}", expected_size, received_bytes);
+                        eprintln!(
+                            "[transfer][receiver] EOF prematuro/mismatch: expected_size={} received_bytes={}",
+                            expected_size, received_bytes
+                        );
                         let _ = tokio::fs::remove_file(&part_path).await;
                         return StatusCode::BAD_REQUEST;
                     }
@@ -179,7 +194,7 @@ async fn start_discovery(
             )
             .layer(CorsLayer::permissive());
 
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("0.0.0.0:{}", http_port);
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
                 let actual_port = listener.local_addr().unwrap().port();
@@ -188,7 +203,7 @@ async fn start_discovery(
                 let _ = axum::serve(listener, app).await;
             }
             Err(e) => {
-                eprintln!("FATAL: Failed to bind on port {}: {}", port, e);
+                eprintln!("FATAL: Failed to bind on port {}: {}", http_port, e);
             }
         }
     });
@@ -270,6 +285,8 @@ async fn send_file_to_peer(
         download_url: String::new(),
     };
 
+    println!("[transfer][sender] expected_size={}", filesize);
+
     println!("Sending notification to {}: file {} ({} bytes)", notify_url, filename, filesize);
 
     client
@@ -277,7 +294,9 @@ async fn send_file_to_peer(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("Notify failed: {}", e))?;
+        .map_err(|e| format!("Notify failed: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("Notify HTTP error: {}", e))?;
 
     // Step 2: Push the file data to the peer using streaming
     let upload_url = format!(
@@ -293,16 +312,22 @@ async fn send_file_to_peer(
     let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024);
     let body = reqwest::Body::wrap_stream(stream);
 
-    client
+    let sent_response = client
         .post(&upload_url)
         .header("content-type", "application/octet-stream")
         .header("X-File-Size", filesize.to_string())
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("Upload failed: {}", e))?;
+        .map_err(|e| format!("Upload failed: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("Upload HTTP error: {}", e))?;
 
-    println!("Sent {} bytes to {}", filesize, target_ip);
+    println!(
+        "[transfer][sender] sent_bytes={} status={}",
+        filesize,
+        sent_response.status()
+    );
     Ok(())
 }
 
