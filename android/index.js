@@ -34,15 +34,17 @@ LogBox.ignoreLogs(['new NativeEventEmitter']);
 class UdpDiscoveryService {
     socket = null;
     deviceName = '';
+    deviceId = '';
     isScanning = false;
     devices = new Map();
     listeners = [];
     logCallback = null;
+    broadcastLoop = null;
+    ttlCleanupLoop = null;
 
     // Config
-    PORT = 5353; // mDNS port
-    MCAST_ADDR = '224.0.0.251'; // mDNS multicast group
-    BROADCAST_PORT = 41234; // Custom protocol port for Android-Android
+    BROADCAST_PORT = 41234; // UDP discovery port
+    TCP_PORT = 8080; // HTTP transfer port
 
     setLogger(cb) { this.logCallback = cb; }
     log(msg) {
@@ -52,31 +54,25 @@ class UdpDiscoveryService {
 
     async start(name) {
         this.deviceName = name;
+        // Generate unique device ID
+        this.deviceId = `android-${Math.random().toString(36).substring(2, 15)}`;
         this.devices.clear();
         this.notify();
         this.isScanning = true;
         this.log('[UDP] Starting Sequence...');
 
-        // 1. Perms (only request runtime permissions, not manifest-only)
+        // 1. Acquire MulticastLock (Android only)
         if (Platform.OS === 'android') {
             try {
-                // INTERNET, ACCESS_WIFI_STATE, CHANGE_WIFI_MULTICAST_STATE are manifest-only
-                // They don't need runtime requests and cause crashes if requested
-                // For UDP discovery on LAN, we only need manifest permissions
-
-                // Optional: Request location if needed for WiFi scanning (Android 10+)
-                // Uncomment if you need to scan WiFi networks:
-                // const perms = [];
-                // if (PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION) {
-                //     perms.push(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
-                // }
-                // if (perms.length > 0) {
-                //     await PermissionsAndroid.requestMultiple(perms);
-                // }
-
-                this.log('[UDP] Permissions OK (manifest-only, no runtime needed)');
+                const { MulticastLockModule } = NativeModules;
+                if (MulticastLockModule) {
+                    await MulticastLockModule.acquire();
+                    this.log('[UDP] MulticastLock acquired');
+                } else {
+                    this.log('[UDP] WARNING: MulticastLockModule not found');
+                }
             } catch (e) {
-                this.log('[UDP] Perms Error: ' + e.message);
+                this.log('[UDP] MulticastLock Error: ' + e.message);
             }
         }
 
@@ -107,19 +103,71 @@ class UdpDiscoveryService {
             });
 
             this.socket.on('message', (msg, rinfo) => {
-                // ... handling
+                try {
+                    const data = JSON.parse(msg.toString());
+                    if (data.app !== 'RichieDrop' || data.id === this.deviceId) return;
+
+                    // Store/update peer
+                    this.devices.set(data.id, {
+                        id: data.id,
+                        name: data.name,
+                        ip: rinfo.address,
+                        port: data.tcp,
+                        lastSeen: Date.now()
+                    });
+                    this.notify();
+
+                    // If DISCOVER, send ANNOUNCE back
+                    if (data.t === 'DISCOVER') {
+                        const announce = {
+                            t: 'ANNOUNCE',
+                            app: 'RichieDrop',
+                            v: 1,
+                            id: this.deviceId,
+                            name: this.deviceName,
+                            tcp: this.TCP_PORT
+                        };
+                        const announceStr = JSON.stringify(announce);
+                        this.socket.send(announceStr, 0, announceStr.length, this.BROADCAST_PORT, rinfo.address, (err) => {
+                            if (err) this.log('ANNOUNCE error: ' + err);
+                        });
+                    }
+                } catch (e) {
+                    // Ignore non-JSON messages
+                }
             });
 
-            // Loop
+            // Broadcast DISCOVER every 1s
             this.broadcastLoop = setInterval(() => {
                 if (!this.isScanning) return;
-                const message = `RICHIEDROP:${this.deviceName}`;
+                const discover = {
+                    t: 'DISCOVER',
+                    app: 'RichieDrop',
+                    v: 1,
+                    id: this.deviceId,
+                    name: this.deviceName,
+                    tcp: this.TCP_PORT
+                };
+                const discoverStr = JSON.stringify(discover);
                 if (this.socket) {
-                    this.socket.send(message, 0, message.length, this.BROADCAST_PORT, '255.255.255.255', (err) => {
+                    this.socket.send(discoverStr, 0, discoverStr.length, this.BROADCAST_PORT, '255.255.255.255', (err) => {
                         if (err) this.log('Broadcast error: ' + err);
                     });
                 }
-            }, 3000);
+            }, 1000);
+
+            // TTL cleanup every 2s
+            this.ttlCleanupLoop = setInterval(() => {
+                const now = Date.now();
+                let changed = false;
+                for (const [id, peer] of this.devices) {
+                    if (now - peer.lastSeen > 8000) {
+                        this.devices.delete(id);
+                        changed = true;
+                    }
+                }
+                if (changed) this.notify();
+            }, 2000);
 
         } catch (e) {
             this.log('[UDP] FATAL CRASH: ' + e.message);
@@ -131,10 +179,22 @@ class UdpDiscoveryService {
     stop() {
         this.isScanning = false;
         if (this.broadcastLoop) clearInterval(this.broadcastLoop);
+        if (this.ttlCleanupLoop) clearInterval(this.ttlCleanupLoop);
         if (this.socket) {
             try { this.socket.close(); } catch (e) { }
             this.socket = null;
         }
+
+        // Release MulticastLock
+        if (Platform.OS === 'android') {
+            try {
+                const { MulticastLockModule } = NativeModules;
+                if (MulticastLockModule) {
+                    MulticastLockModule.release();
+                }
+            } catch (e) { }
+        }
+
         this.log('[UDP] Stopped');
     }
 

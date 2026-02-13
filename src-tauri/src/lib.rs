@@ -1,21 +1,29 @@
 use axum::{
     body::Body,
-    extract::{Json, Path},
+    extract::{Json, Path, Request},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::post,
     Router,
 };
 use futures_util::StreamExt;
 use local_ip_address::local_ip;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::path::PathBuf;
+use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 use tower_http::cors::CorsLayer;
 
+// Discovery module
+pub mod discovery;
+use discovery::DiscoveryService;
+
 // ── Global state ──
 static SERVER_PORT: LazyLock<Mutex<Option<u16>>> = LazyLock::new(|| Mutex::new(None));
+static DISCOVERY_SERVICE: LazyLock<Mutex<Option<DiscoveryService>>> = LazyLock::new(|| Mutex::new(None));
+static PAIRING_TOKENS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 // ── Data types ──
 
@@ -36,6 +44,8 @@ pub struct NotifyPayload {
     download_url: String,
 }
 
+// ── Token Management (Simplified) ──
+
 // ── Commands ──
 
 #[tauri::command]
@@ -44,19 +54,15 @@ async fn start_discovery(
     device_name: String,
     port: u16,
 ) -> Result<String, String> {
-    let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
+    // Create and start UDP discovery service
+    let discovery = DiscoveryService::new(device_name.clone(), port);
+    discovery.start(app_handle.clone())?;
+    
+    // Store in global state
+    *DISCOVERY_SERVICE.lock().unwrap() = Some(discovery);
 
     let my_ip = local_ip().map_err(|e| e.to_string())?;
     let ip_str = my_ip.to_string();
-    let service_type = "_richiedrop._tcp.local.";
-    let instance_name = &device_name;
-    let host_name = format!("{}.local.", device_name.replace(" ", "-"));
-
-    let service_info =
-        ServiceInfo::new(service_type, instance_name, &host_name, &ip_str, port, None)
-            .map_err(|e| e.to_string())?;
-
-    mdns.register(service_info).map_err(|e| e.to_string())?;
 
     // Start HTTP server
     let app_handle_server = app_handle.clone();
@@ -147,48 +153,44 @@ async fn start_discovery(
         }
     });
 
-    // Browse for others
-    let receiver = mdns.browse(service_type).map_err(|e| e.to_string())?;
-    let app_handle_clone = app_handle.clone();
-    let my_ip_clone = my_ip.clone();
-
-    tauri::async_runtime::spawn(async move {
-        while let Ok(event) = receiver.recv_async().await {
-            match event {
-                ServiceEvent::ServiceResolved(info) => {
-                    let id = info.get_fullname().to_string();
-                    let addrs = info.get_addresses();
-                    if let Some(addr) = addrs.iter().next() {
-                        if addr.to_string() == my_ip_clone.to_string() {
-                            continue;
-                        }
-                        let device = Device {
-                            id: id.clone(),
-                            name: info.get_hostname().trim_end_matches('.').to_string(),
-                            ip: addr.to_string(),
-                            port: info.get_port(),
-                            last_seen: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                        };
-                        let _ = app_handle_clone.emit("device-found", device);
-                    }
-                }
-                ServiceEvent::ServiceRemoved(_service_type, fullname) => {
-                    let _ = app_handle_clone.emit("device-lost", fullname);
-                }
-                _ => {}
-            }
-        }
-    });
-
     Ok(ip_str)
 }
 
 #[tauri::command]
-fn get_devices() -> Vec<Device> {
-    vec![]
+fn stop_discovery() -> Result<(), String> {
+    if let Some(discovery) = DISCOVERY_SERVICE.lock().unwrap().as_ref() {
+        discovery.stop();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_devices() -> Vec<discovery::Peer> {
+    if let Some(discovery) = DISCOVERY_SERVICE.lock().unwrap().as_ref() {
+        discovery.get_peers()
+    } else {
+        vec![]
+    }
+}
+
+#[tauri::command]
+fn generate_pair_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let token = format!("richiedrop-{}", timestamp);
+    
+    // Auto-add generated token
+    PAIRING_TOKENS.lock().unwrap().insert(token.clone());
+    token
+}
+
+#[tauri::command]
+fn add_pair_token(token: String) -> Result<(), String> {
+    PAIRING_TOKENS.lock().unwrap().insert(token);
+    Ok(())
 }
 
 /// Notify the peer AND push the file to them (sender → receiver)
@@ -297,7 +299,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             start_discovery,
+            stop_discovery,
             get_devices,
+            generate_pair_token,
+            add_pair_token,
             send_file_to_peer,
             save_received_file,
             get_temp_file_path,
