@@ -1,9 +1,6 @@
 use axum::{
-    body::Body,
     extract::{Json, Path, Request},
     http::StatusCode,
-    middleware::{self, Next},
-    response::Response,
     routing::post,
     Router,
 };
@@ -38,10 +35,10 @@ pub struct Device {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct NotifyPayload {
-    filename: String,
-    filesize: String,
-    sender_name: String,
-    download_url: String,
+    pub filename: String,
+    pub filesize: u64,
+    pub sender_name: String,
+    pub download_url: String,
 }
 
 // ── Token Management (Simplified) ──
@@ -82,17 +79,37 @@ async fn start_discovery(
             )
             .route(
                 "/upload/{filename}",
-                post(move |Path(filename): Path<String>, body: Body| async move {
-                    println!("Receiving file upload: {}", filename);
-                    // Save to temp directory
+                post(move |Path(filename): Path<String>, req: Request| async move {
+                    let expected_size = req
+                        .headers()
+                        .get("X-File-Size")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .or_else(|| {
+                            req.headers()
+                                .get(axum::http::header::CONTENT_LENGTH)
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|s| s.parse::<u64>().ok())
+                        });
+
+                    let Some(expected_size) = expected_size else {
+                        eprintln!("Missing file size header");
+                        return StatusCode::LENGTH_REQUIRED;
+                    };
+
+                    println!("Receiving file upload: {} ({} bytes)", filename, expected_size);
+                    
                     let temp_dir = std::env::temp_dir().join("richiedrop_incoming");
                     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
                         eprintln!("Failed to create temp dir: {}", e);
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
 
+                    let part_filename = format!("{}.part", filename);
+                    let part_path = temp_dir.join(&part_filename);
                     let save_path = temp_dir.join(&filename);
-                    let file = match tokio::fs::File::create(&save_path).await {
+
+                    let file = match tokio::fs::File::create(&part_path).await {
                         Ok(f) => f,
                         Err(e) => {
                             eprintln!("Failed to create temp file: {}", e);
@@ -101,7 +118,8 @@ async fn start_discovery(
                     };
 
                     let mut writer = tokio::io::BufWriter::new(file);
-                    let mut stream = body.into_data_stream();
+                    let mut stream = req.into_body().into_data_stream();
+                    let mut received_bytes: u64 = 0;
 
                     while let Some(chunk) = stream.next().await {
                         match chunk {
@@ -110,6 +128,7 @@ async fn start_discovery(
                                     eprintln!("Write error: {}", e);
                                     return StatusCode::INTERNAL_SERVER_ERROR;
                                 }
+                                received_bytes += data.len() as u64;
                             }
                             Err(e) => {
                                 eprintln!("Stream error: {}", e);
@@ -123,9 +142,22 @@ async fn start_discovery(
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
 
+                    println!("Transfer finished: received {} of {} bytes", received_bytes, expected_size);
+
+                    if received_bytes != expected_size {
+                        eprintln!("Error: Size mismatch (EOF prematuro). Received {} but expected {}", received_bytes, expected_size);
+                        let _ = tokio::fs::remove_file(&part_path).await;
+                        return StatusCode::BAD_REQUEST;
+                    }
+
+                    // Rename .part to final filename
+                    if let Err(e) = tokio::fs::rename(&part_path, &save_path).await {
+                        eprintln!("Rename error: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+
                     println!("File saved to temp: {:?}", save_path);
 
-                    // Emit event so frontend knows the file arrived
                     let _ = app_handle_upload.emit(
                         "file-uploaded",
                         serde_json::json!({
@@ -212,21 +244,25 @@ async fn send_file_to_peer(
         .to_string_lossy()
         .to_string();
 
-    let file_data = tokio::fs::read(&path)
+    let file = tokio::fs::File::open(&path)
         .await
-        .map_err(|e| format!("Cannot read file: {}", e))?;
+        .map_err(|e| format!("Cannot open file: {}", e))?;
+    
+    let metadata = file.metadata().await.map_err(|e| format!("Metadata error: {}", e))?;
+    let filesize = metadata.len();
 
-    let filesize = format!("{}", file_data.len());
     let client = reqwest::Client::new();
 
     // Step 1: Notify the peer (lightweight metadata)
     let notify_url = format!("http://{}:{}/notify", target_ip, target_port);
     let payload = NotifyPayload {
         filename: filename.clone(),
-        filesize: filesize.clone(),
+        filesize,
         sender_name,
-        download_url: String::new(), // Not used anymore
+        download_url: String::new(),
     };
+
+    println!("Sending notification to {}: file {} ({} bytes)", notify_url, filename, filesize);
 
     client
         .post(&notify_url)
@@ -235,7 +271,7 @@ async fn send_file_to_peer(
         .await
         .map_err(|e| format!("Notify failed: {}", e))?;
 
-    // Step 2: Push the file data to the peer
+    // Step 2: Push the file data to the peer using streaming
     let upload_url = format!(
         "http://{}:{}/upload/{}",
         target_ip,
@@ -243,13 +279,22 @@ async fn send_file_to_peer(
         urlencoding::encode(&filename)
     );
 
+    println!("Uploading to {}: {} bytes", upload_url, filesize);
+
+    // Create a stream from the file
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024); // 256KB chunks
+    let body = reqwest::Body::wrap_stream(stream);
+
     client
         .post(&upload_url)
         .header("content-type", "application/octet-stream")
-        .body(file_data)
+        .header("X-File-Size", filesize.to_string())
+        .body(body)
         .send()
         .await
         .map_err(|e| format!("Upload failed: {}", e))?;
+
+    println!("Sent {} bytes to {}", filesize, target_ip);
 
     Ok(())
 }
