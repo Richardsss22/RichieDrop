@@ -109,6 +109,11 @@ async fn start_discovery(
                     let part_path = temp_dir.join(&part_filename);
                     let save_path = temp_dir.join(&filename);
 
+                    // Se existir part antigo, remove
+                    if part_path.exists() {
+                         let _ = tokio::fs::remove_file(&part_path).await;
+                    }
+
                     let file = match tokio::fs::File::create(&part_path).await {
                         Ok(f) => f,
                         Err(e) => {
@@ -145,12 +150,15 @@ async fn start_discovery(
                     println!("Transfer finished: received {} of {} bytes", received_bytes, expected_size);
 
                     if received_bytes != expected_size {
-                        eprintln!("Error: Size mismatch (EOF prematuro). Received {} but expected {}", received_bytes, expected_size);
+                        eprintln!("[transfer][receiver] Mismatch or EOF prematuro: expected_size={} received_bytes={}", expected_size, received_bytes);
                         let _ = tokio::fs::remove_file(&part_path).await;
                         return StatusCode::BAD_REQUEST;
                     }
 
-                    // Rename .part to final filename
+                    // Só renomear no fim (ficheiro completo)
+                    if save_path.exists() {
+                        let _ = tokio::fs::remove_file(&save_path).await;
+                    }
                     if let Err(e) = tokio::fs::rename(&part_path, &save_path).await {
                         eprintln!("Rename error: {}", e);
                         return StatusCode::INTERNAL_SERVER_ERROR;
@@ -281,8 +289,8 @@ async fn send_file_to_peer(
 
     println!("Uploading to {}: {} bytes", upload_url, filesize);
 
-    // Create a stream from the file
-    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024); // 256KB chunks
+    // Create a stream from the file - using 256KB chunks as requested
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024);
     let body = reqwest::Body::wrap_stream(stream);
 
     client
@@ -295,7 +303,6 @@ async fn send_file_to_peer(
         .map_err(|e| format!("Upload failed: {}", e))?;
 
     println!("Sent {} bytes to {}", filesize, target_ip);
-
     Ok(())
 }
 
